@@ -4,3 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arrow = "57.1.0"
+parquet = "57.1.0"
+sqlparser = "0.60.0"
+tempfile = "3.23.0"
