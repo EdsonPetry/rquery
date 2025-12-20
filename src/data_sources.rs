@@ -206,20 +206,9 @@ impl DataSource for InMemoryDataSource {
 
 #[cfg(test)]
 mod tests {
-    use crate::data_sources::DataSource;
-
     use super::*;
-    use arrow::array::StringArray;
-    use std::io::Write;
-    use tempfile::NamedTempFile;
-
-    fn create_test_csv(content: &str) -> NamedTempFile {
-        let mut file = NamedTempFile::new().expect("Failed to create temp file");
-        file.write_all(content.as_bytes())
-            .expect("Failed to write test data");
-        file.flush().expect("Failed to flush");
-        file
-    }
+    use arrow::array::{Int32Array, StringArray};
+    use arrow::datatypes::{DataType, Field};
 
     fn get_string_column(batch: &RecordBatch, col_name: &str) -> Vec<String> {
         let col_idx = batch.schema().index_of(col_name).unwrap();
@@ -229,6 +218,13 @@ mod tests {
             .iter()
             .map(|v| v.unwrap().to_string())
             .collect()
+    }
+
+    fn get_int_column(batch: &RecordBatch, col_name: &str) -> Vec<i32> {
+        let col_idx = batch.schema().index_of(col_name).unwrap();
+        let array = batch.column(col_idx);
+        let int_array = array.as_any().downcast_ref::<Int32Array>().unwrap();
+        int_array.iter().map(|v| v.unwrap()).collect()
     }
 
     fn get_column_names(batch: &RecordBatch) -> Vec<String> {
@@ -246,132 +242,480 @@ mod tests {
         iter.filter_map(|r| r.ok()).collect()
     }
 
-    mod schema_inference {
+    mod csv_data_source {
         use super::*;
+        use std::io::Write;
+        use tempfile::NamedTempFile;
 
-        #[test]
-        fn infers_column_names_from_header() {
-            let csv_content = "name;age;city\nAlice;30;NYC\nBob;25;LA";
-            let file = create_test_csv(csv_content);
-
-            let csv = CsvDataSource::try_new(file.path().to_string_lossy().to_string(), b';', true)
-                .unwrap();
-            let schema = csv.schema();
-            let columns: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
-
-            assert_eq!(columns, vec!["name", "age", "city"]);
+        fn create_test_csv(content: &str) -> NamedTempFile {
+            let mut file = NamedTempFile::new().expect("Failed to create temp file");
+            file.write_all(content.as_bytes())
+                .expect("Failed to write test data");
+            file.flush().expect("Failed to flush");
+            file
         }
 
-        #[test]
-        fn schema_can_be_called_multiple() {
-            let csv_content = "name;age;city\nAlice;30;NYC\nBob;25;LA\n";
-            let file = create_test_csv(csv_content);
+        mod schema_inference {
+            use super::*;
 
-            let csv = CsvDataSource::try_new(file.path().to_string_lossy().to_string(), b';', true)
-                .unwrap();
+            #[test]
+            fn infers_column_names_from_header() {
+                let csv_content = "name;age;city\nAlice;30;NYC\nBob;25;LA";
+                let file = create_test_csv(csv_content);
 
-            let schema1 = csv.schema();
-            let schema2 = csv.schema();
+                let csv =
+                    CsvDataSource::try_new(file.path().to_string_lossy().to_string(), b';', true)
+                        .unwrap();
+                let schema = csv.schema();
+                let columns: Vec<&str> =
+                    schema.fields().iter().map(|f| f.name().as_str()).collect();
 
-            assert!(Arc::ptr_eq(&schema1, &schema2));
+                assert_eq!(columns, vec!["name", "age", "city"]);
+            }
+
+            #[test]
+            fn schema_can_be_called_multiple_times() {
+                let csv_content = "name;age;city\nAlice;30;NYC\nBob;25;LA\n";
+                let file = create_test_csv(csv_content);
+
+                let csv =
+                    CsvDataSource::try_new(file.path().to_string_lossy().to_string(), b';', true)
+                        .unwrap();
+
+                let schema1 = csv.schema();
+                let schema2 = csv.schema();
+
+                assert!(Arc::ptr_eq(&schema1, &schema2));
+            }
+
+            #[test]
+            fn schema_without_header() {
+                let csv_content = "Alice;30;NYC\nBob;25;LA\n";
+                let file = create_test_csv(csv_content);
+
+                let csv =
+                    CsvDataSource::try_new(file.path().to_string_lossy().to_string(), b';', false)
+                        .unwrap();
+                let schema = csv.schema();
+                let columns: Vec<&str> =
+                    schema.fields().iter().map(|f| f.name().as_str()).collect();
+
+                assert_eq!(columns.len(), 3);
+            }
         }
 
-        #[test]
-        fn schema_without_header() {
-            let csv_content = "Alice;30;NYC\nBob;25;LA\n";
-            let file = create_test_csv(csv_content);
+        mod scan_without_projection {
+            use super::*;
 
-            let csv =
-                CsvDataSource::try_new(file.path().to_string_lossy().to_string(), b';', false)
-                    .unwrap();
-            let schema = csv.schema();
-            let columns: Vec<&str> = schema.fields().iter().map(|f| f.name().as_str()).collect();
+            #[test]
+            fn returns_all_columns() {
+                let csv_content = "name;age;city\nAlice;30;NYC\nBob;25;LA";
+                let file = create_test_csv(csv_content);
 
-            assert_eq!(columns.len(), 3);
+                let source =
+                    CsvDataSource::try_new(file.path().to_string_lossy().to_string(), b';', true)
+                        .unwrap();
+                let batches = collect_batches(source.scan(None).unwrap());
+
+                let total_columns: usize = batches.iter().map(|b| b.num_columns()).sum();
+                assert_eq!(total_columns, 3);
+            }
+
+            #[test]
+            fn returns_all_rows() {
+                let csv_content = "name;age\nAlice;30\nBob;25\nCharlie;33";
+                let file = create_test_csv(csv_content);
+
+                let source =
+                    CsvDataSource::try_new(file.path().to_string_lossy().to_string(), b';', true)
+                        .unwrap();
+                let batches = collect_batches(source.scan(None).unwrap());
+
+                let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                assert_eq!(total_rows, 3)
+            }
+
+            #[test]
+            fn returns_correct_data() {
+                let csv_content = "name;city\nAlice;NYC\nBob;LA";
+                let file = create_test_csv(csv_content);
+
+                let source =
+                    CsvDataSource::try_new(file.path().to_string_lossy().to_string(), b';', true)
+                        .unwrap();
+                let mut iter = source.scan(None).unwrap();
+                let batch = iter.next().unwrap().unwrap();
+
+                assert_eq!(get_string_column(&batch, "name"), vec!["Alice", "Bob"]);
+                assert_eq!(get_string_column(&batch, "city"), vec!["NYC", "LA"]);
+            }
+        }
+
+        mod scan_with_projection {
+            use super::*;
+
+            #[test]
+            fn returns_projected_columns() {
+                let csv_content = "name;age;city\nAlice;30;NYC\nBob;25;LA";
+                let file = create_test_csv(csv_content);
+
+                let source =
+                    CsvDataSource::try_new(file.path().to_string_lossy().to_string(), b';', true)
+                        .unwrap();
+                let projection = Some(vec![String::from("name"), String::from("city")]);
+                let mut iter = source.scan(projection).unwrap();
+
+                let batch = iter.next().unwrap().unwrap();
+                assert_eq!(batch.num_columns(), 2);
+                assert_eq!(get_column_names(&batch), vec!["name", "city"]);
+            }
+
+            #[test]
+            fn projected_columns_have_correct_data() {
+                let csv_content = "name;age;city\nAlice;30;NYC\nBob;25;LA";
+                let file = create_test_csv(csv_content);
+
+                let source =
+                    CsvDataSource::try_new(file.path().to_string_lossy().to_string(), b';', true)
+                        .unwrap();
+                let projection = Some(vec![String::from("name"), String::from("city")]);
+                let mut iter = source.scan(projection).unwrap();
+
+                let batch = iter.next().unwrap().unwrap();
+                assert_eq!(get_string_column(&batch, "name"), vec!["Alice", "Bob"]);
+                assert_eq!(get_string_column(&batch, "city"), vec!["NYC", "LA"]);
+            }
         }
     }
 
-    mod scan_without_projection {
-        use std::vec;
-
+    mod parquet_data_source {
         use super::*;
+        use parquet::arrow::ArrowWriter;
+        use tempfile::NamedTempFile;
 
-        #[test]
-        fn returns_all_columns() {
-            let csv_content = "name;age;city\nAlice;30;NYC\nBob;25;LA";
-            let file = create_test_csv(csv_content);
+        fn create_test_parquet(batches: &[RecordBatch]) -> NamedTempFile {
+            let file = NamedTempFile::new().expect("Failed to create temp file");
+            let props = None;
+            let mut writer =
+                ArrowWriter::try_new(file.reopen().unwrap(), batches[0].schema(), props).unwrap();
 
-            let source =
-                CsvDataSource::try_new(file.path().to_string_lossy().to_string(), b';', true)
-                    .unwrap();
-            let batches = collect_batches(source.scan(None).unwrap());
-
-            let total_columns: usize = batches.iter().map(|b| b.num_columns()).sum();
-            assert_eq!(total_columns, 3);
+            for batch in batches {
+                writer.write(batch).unwrap();
+            }
+            writer.close().unwrap();
+            file
         }
 
-        #[test]
-        fn returns_all_rows() {
-            let csv_content = "name;age\nAlice;30\nBob;25\nCharlie;33";
-            let file = create_test_csv(csv_content);
+        fn create_test_batch() -> RecordBatch {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("name", DataType::Utf8, false),
+                Field::new("age", DataType::Int32, false),
+                Field::new("city", DataType::Utf8, false),
+            ]));
 
-            let source =
-                CsvDataSource::try_new(file.path().to_string_lossy().to_string(), b';', true)
-                    .unwrap();
-            let batches = collect_batches(source.scan(None).unwrap());
-
-            let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-            assert_eq!(total_rows, 3)
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["Alice", "Bob"])),
+                    Arc::new(Int32Array::from(vec![30, 25])),
+                    Arc::new(StringArray::from(vec!["NYC", "LA"])),
+                ],
+            )
+            .unwrap()
         }
 
-        #[test]
-        fn returns_correct_data() {
-            let csv_content = "name;city\nAlice;NYC\nBob;LA";
-            let file = create_test_csv(csv_content);
+        mod schema_inference {
+            use super::*;
 
-            let source =
-                CsvDataSource::try_new(file.path().to_string_lossy().to_string(), b';', true)
-                    .unwrap();
-            let mut iter = source.scan(None).unwrap();
-            let batch = iter.next().unwrap().unwrap();
+            #[test]
+            fn infers_schema_from_parquet() {
+                let batch = create_test_batch();
+                let file = create_test_parquet(&[batch]);
 
-            assert_eq!(get_string_column(&batch, "name"), vec!["Alice", "Bob"]);
-            assert_eq!(get_string_column(&batch, "city"), vec!["NYC", "LA"]);
+                let source = ParquetDataSource::try_new(&file.path().to_string_lossy()).unwrap();
+                let schema = source.schema();
+                let columns: Vec<&str> =
+                    schema.fields().iter().map(|f| f.name().as_str()).collect();
+
+                assert_eq!(columns, vec!["name", "age", "city"]);
+            }
+
+            #[test]
+            fn schema_can_be_called_multiple_times() {
+                let batch = create_test_batch();
+                let file = create_test_parquet(&[batch]);
+
+                let source = ParquetDataSource::try_new(&file.path().to_string_lossy()).unwrap();
+
+                let schema1 = source.schema();
+                let schema2 = source.schema();
+
+                assert!(Arc::ptr_eq(&schema1, &schema2));
+            }
+        }
+
+        mod scan_without_projection {
+            use super::*;
+
+            #[test]
+            fn returns_all_columns() {
+                let batch = create_test_batch();
+                let file = create_test_parquet(&[batch]);
+
+                let source = ParquetDataSource::try_new(&file.path().to_string_lossy()).unwrap();
+                let batches = collect_batches(source.scan(None).unwrap());
+
+                let total_columns: usize = batches.iter().map(|b| b.num_columns()).sum();
+                assert_eq!(total_columns, 3);
+            }
+
+            #[test]
+            fn returns_all_rows() {
+                let batch = create_test_batch();
+                let file = create_test_parquet(&[batch]);
+
+                let source = ParquetDataSource::try_new(&file.path().to_string_lossy()).unwrap();
+                let batches = collect_batches(source.scan(None).unwrap());
+
+                let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                assert_eq!(total_rows, 2);
+            }
+
+            #[test]
+            fn returns_correct_data() {
+                let batch = create_test_batch();
+                let file = create_test_parquet(&[batch]);
+
+                let source = ParquetDataSource::try_new(&file.path().to_string_lossy()).unwrap();
+                let mut iter = source.scan(None).unwrap();
+                let batch = iter.next().unwrap().unwrap();
+
+                assert_eq!(get_string_column(&batch, "name"), vec!["Alice", "Bob"]);
+                assert_eq!(get_int_column(&batch, "age"), vec![30, 25]);
+                assert_eq!(get_string_column(&batch, "city"), vec!["NYC", "LA"]);
+            }
+        }
+
+        mod scan_with_projection {
+            use super::*;
+
+            #[test]
+            fn returns_projected_columns() {
+                let batch = create_test_batch();
+                let file = create_test_parquet(&[batch]);
+
+                let source = ParquetDataSource::try_new(&file.path().to_string_lossy()).unwrap();
+                let projection = Some(vec![String::from("name"), String::from("city")]);
+                let mut iter = source.scan(projection).unwrap();
+
+                let batch = iter.next().unwrap().unwrap();
+                assert_eq!(batch.num_columns(), 2);
+                assert_eq!(get_column_names(&batch), vec!["name", "city"]);
+            }
+
+            #[test]
+            fn projected_columns_have_correct_data() {
+                let batch = create_test_batch();
+                let file = create_test_parquet(&[batch]);
+
+                let source = ParquetDataSource::try_new(&file.path().to_string_lossy()).unwrap();
+                let projection = Some(vec![String::from("name"), String::from("city")]);
+                let mut iter = source.scan(projection).unwrap();
+
+                let batch = iter.next().unwrap().unwrap();
+                assert_eq!(get_string_column(&batch, "name"), vec!["Alice", "Bob"]);
+                assert_eq!(get_string_column(&batch, "city"), vec!["NYC", "LA"]);
+            }
         }
     }
 
-    mod scan_with_projection {
+    mod in_memory_data_source {
         use super::*;
 
-        #[test]
-        fn returns_projected_columns() {
-            let csv_content = "name;age;city\nAlice;30;NYC\nBob;25;LA";
-            let file = create_test_csv(csv_content);
+        fn create_test_batch() -> RecordBatch {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("name", DataType::Utf8, false),
+                Field::new("age", DataType::Int32, false),
+                Field::new("city", DataType::Utf8, false),
+            ]));
 
-            let source =
-                CsvDataSource::try_new(file.path().to_string_lossy().to_string(), b';', true)
-                    .unwrap();
-            let projection = Some(vec![String::from("name"), String::from("city")]);
-            let mut iter = source.scan(projection).unwrap();
-
-            let batch = iter.next().unwrap().unwrap();
-            assert_eq!(batch.num_columns(), 2);
-            assert_eq!(get_column_names(&batch), vec!["name", "city"]);
+            RecordBatch::try_new(
+                schema,
+                vec![
+                    Arc::new(StringArray::from(vec!["Alice", "Bob"])),
+                    Arc::new(Int32Array::from(vec![30, 25])),
+                    Arc::new(StringArray::from(vec!["NYC", "LA"])),
+                ],
+            )
+            .unwrap()
         }
 
-        fn projected_columns_have_correct_data() {
-            let csv_content = "name;age;city\nAlice;30;NYC;Bob;25;LA";
-            let file = create_test_csv(csv_content);
+        fn create_multi_batch_data() -> Vec<RecordBatch> {
+            let schema = Arc::new(Schema::new(vec![
+                Field::new("name", DataType::Utf8, false),
+                Field::new("age", DataType::Int32, false),
+            ]));
 
-            let source =
-                CsvDataSource::try_new(file.path().to_string_lossy().to_string(), b';', true)
-                    .unwrap();
-            let projection = Some(vec![String::from("name"), String::from("city")]);
-            let mut iter = source.scan(projection).unwrap();
+            vec![
+                RecordBatch::try_new(
+                    schema.clone(),
+                    vec![
+                        Arc::new(StringArray::from(vec!["Alice", "Bob"])),
+                        Arc::new(Int32Array::from(vec![30, 25])),
+                    ],
+                )
+                .unwrap(),
+                RecordBatch::try_new(
+                    schema,
+                    vec![
+                        Arc::new(StringArray::from(vec!["Charlie", "Diana"])),
+                        Arc::new(Int32Array::from(vec![35, 28])),
+                    ],
+                )
+                .unwrap(),
+            ]
+        }
 
-            let batch = iter.next().unwrap().unwrap();
-            assert_eq!(get_string_column(&batch, "name"), vec!["Alice", "Bob"]);
-            assert_eq!(get_string_column(&batch, "city"), vec!["NYC", "LA"]);
+        mod schema {
+            use super::*;
+
+            #[test]
+            fn returns_schema_from_data() {
+                let batch = create_test_batch();
+                let source = InMemoryDataSource::try_new(Some(vec![batch])).unwrap();
+
+                let schema = source.schema();
+                let columns: Vec<&str> =
+                    schema.fields().iter().map(|f| f.name().as_str()).collect();
+
+                assert_eq!(columns, vec!["name", "age", "city"]);
+            }
+
+            #[test]
+            fn returns_empty_schema_when_no_data() {
+                let source = InMemoryDataSource::try_new(None).unwrap();
+                let schema = source.schema();
+
+                assert_eq!(schema.fields().len(), 0);
+            }
+
+            #[test]
+            fn schema_can_be_called_multiple_times() {
+                let batch = create_test_batch();
+                let source = InMemoryDataSource::try_new(Some(vec![batch])).unwrap();
+
+                let schema1 = source.schema();
+                let schema2 = source.schema();
+
+                assert!(Arc::ptr_eq(&schema1, &schema2));
+            }
+        }
+
+        mod scan_without_projection {
+            use super::*;
+
+            #[test]
+            fn returns_all_columns() {
+                let batch = create_test_batch();
+                let source = InMemoryDataSource::try_new(Some(vec![batch])).unwrap();
+                let batches = collect_batches(source.scan(None).unwrap());
+
+                let total_columns: usize = batches.iter().map(|b| b.num_columns()).sum();
+                assert_eq!(total_columns, 3);
+            }
+
+            #[test]
+            fn returns_all_rows() {
+                let batch = create_test_batch();
+                let source = InMemoryDataSource::try_new(Some(vec![batch])).unwrap();
+                let batches = collect_batches(source.scan(None).unwrap());
+
+                let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                assert_eq!(total_rows, 2);
+            }
+
+            #[test]
+            fn returns_correct_data() {
+                let batch = create_test_batch();
+                let source = InMemoryDataSource::try_new(Some(vec![batch])).unwrap();
+                let mut iter = source.scan(None).unwrap();
+                let batch = iter.next().unwrap().unwrap();
+
+                assert_eq!(get_string_column(&batch, "name"), vec!["Alice", "Bob"]);
+                assert_eq!(get_int_column(&batch, "age"), vec![30, 25]);
+                assert_eq!(get_string_column(&batch, "city"), vec!["NYC", "LA"]);
+            }
+
+            #[test]
+            fn handles_multiple_batches() {
+                let data = create_multi_batch_data();
+                let source = InMemoryDataSource::try_new(Some(data)).unwrap();
+                let batches = collect_batches(source.scan(None).unwrap());
+
+                assert_eq!(batches.len(), 2);
+                let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                assert_eq!(total_rows, 4);
+            }
+
+            #[test]
+            fn handles_empty_data() {
+                let source = InMemoryDataSource::try_new(None).unwrap();
+                let batches = collect_batches(source.scan(None).unwrap());
+
+                assert_eq!(batches.len(), 0);
+            }
+        }
+
+        mod scan_with_projection {
+            use super::*;
+
+            #[test]
+            fn returns_projected_columns() {
+                let batch = create_test_batch();
+                let source = InMemoryDataSource::try_new(Some(vec![batch])).unwrap();
+                let projection = Some(vec![String::from("name"), String::from("city")]);
+                let mut iter = source.scan(projection).unwrap();
+
+                let batch = iter.next().unwrap().unwrap();
+                assert_eq!(batch.num_columns(), 2);
+                assert_eq!(get_column_names(&batch), vec!["name", "city"]);
+            }
+
+            #[test]
+            fn projected_columns_have_correct_data() {
+                let batch = create_test_batch();
+                let source = InMemoryDataSource::try_new(Some(vec![batch])).unwrap();
+                let projection = Some(vec![String::from("name"), String::from("city")]);
+                let mut iter = source.scan(projection).unwrap();
+
+                let batch = iter.next().unwrap().unwrap();
+                assert_eq!(get_string_column(&batch, "name"), vec!["Alice", "Bob"]);
+                assert_eq!(get_string_column(&batch, "city"), vec!["NYC", "LA"]);
+            }
+
+            #[test]
+            fn projection_works_with_multiple_batches() {
+                let data = create_multi_batch_data();
+                let source = InMemoryDataSource::try_new(Some(data)).unwrap();
+                let projection = Some(vec![String::from("name")]);
+                let batches = collect_batches(source.scan(projection).unwrap());
+
+                assert_eq!(batches.len(), 2);
+                for batch in &batches {
+                    assert_eq!(batch.num_columns(), 1);
+                    assert_eq!(get_column_names(batch), vec!["name"]);
+                }
+            }
+
+            #[test]
+            fn errors_on_invalid_column_name() {
+                let batch = create_test_batch();
+                let source = InMemoryDataSource::try_new(Some(vec![batch])).unwrap();
+                let projection = Some(vec![String::from("nonexistent")]);
+
+                let result = source.scan(projection);
+                assert!(result.is_err());
+            }
         }
     }
 }
