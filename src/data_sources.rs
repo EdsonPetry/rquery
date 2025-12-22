@@ -5,9 +5,9 @@ use arrow::{
     record_batch::{RecordBatch, RecordBatchIterator},
 };
 use parquet::arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder};
-use std::{fs::File, sync::Arc};
+use std::{fmt::Display, fs::File, sync::Arc};
 
-pub trait DataSource {
+pub trait DataSource: Display + Clone {
     fn schema(&self) -> Arc<Schema>;
 
     fn scan(
@@ -84,6 +84,24 @@ impl DataSource for CsvDataSource {
     }
 }
 
+impl Display for CsvDataSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.filename)
+    }
+}
+
+impl Clone for CsvDataSource {
+    fn clone(&self) -> Self {
+        Self {
+            filename: self.filename.clone(),
+            delimiter: self.delimiter,
+            header: self.header,
+            schema: self.schema.clone(),
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct ParquetDataSource {
     filename: String,
     schema: Arc<Schema>,
@@ -140,6 +158,13 @@ impl DataSource for ParquetDataSource {
     }
 }
 
+impl Display for ParquetDataSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.filename)
+    }
+}
+
+#[derive(Clone)]
 pub struct InMemoryDataSource {
     schema: Arc<Schema>,
     data: Vec<RecordBatch>,
@@ -201,6 +226,12 @@ impl DataSource for InMemoryDataSource {
                 ))
             }
         }
+    }
+}
+
+impl Display for InMemoryDataSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "InMemoryDataSource")
     }
 }
 
