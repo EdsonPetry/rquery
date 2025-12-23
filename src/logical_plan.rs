@@ -1,19 +1,15 @@
 use core::fmt;
-use std::{fmt::Display, iter::chain, sync::Arc};
+use std::{fmt::Display, sync::Arc};
 
 use arrow::datatypes::{DataType, Field, Schema};
 
 use crate::data_sources::DataSource;
 
+// Logical Plan
+
 pub trait LogicalPlan: Display {
-    /// Returns schema that will be produced by logical plan
     fn schema(&self) -> Arc<Schema>;
-
-    /// Returns the children of this logical plan
     fn children(&self) -> Vec<Arc<dyn LogicalPlan>>;
-
-    /// Returns a string representation of just this node (without children)
-    /// e.g., "Projection: #name, #salary * 1.1 AS new_salary"
     fn format_node(&self) -> String;
 }
 
@@ -23,190 +19,276 @@ fn format_plan(plan: &dyn LogicalPlan, f: &mut fmt::Formatter<'_>, indent: usize
     for child in plan.children() {
         format_plan(child.as_ref(), f, indent + 1)?;
     }
-
     Ok(())
 }
 
-// Expression Type          Example
-// ------------------------------------------
-// Literal Value            "hello", 12.34, true
-// Column Reference         user_id, first_name, salary
-// Math Expression          salary * 0.1, price + tax
-// Comparison Expression    age >= 21, status != 'inactive'
-// Boolean Expression       age >= 21 AND country = 'US'
-// Aggregate Expression     MIN(salary), MAX(salary), SUM(amount)
-// Scalar Function          UPPER(name), CONCAT(first_name, ' ', last_name)
-// Aliased Expression       salary * 1.1 AS new_salary
+// Logical Expressions
 
 pub trait LogicalExpr: fmt::Display {
-    fn to_field(&self, input: Arc<dyn LogicalPlan>) -> Arc<Field>;
+    fn to_field(&self, input: &dyn LogicalPlan) -> Arc<Field>;
 }
 
-pub struct ColumnExpr {
-    name: String,
+pub struct Column {
+    pub name: String,
 }
 
-impl ColumnExpr {
-    fn new(name: &str) -> Self {
-        ColumnExpr {
+impl Column {
+    pub fn new(name: &str) -> Self {
+        Column {
             name: name.to_string(),
         }
     }
 }
 
-impl LogicalExpr for ColumnExpr {
-    fn to_field(&self, input: Arc<dyn LogicalPlan>) -> Arc<Field> {
+impl LogicalExpr for Column {
+    fn to_field(&self, input: &dyn LogicalPlan) -> Arc<Field> {
         let schema = input.schema();
-        let fields = schema.fields();
-        let (_, field) = fields
-            .find(self.name.as_str())
-            .expect(format!("No column named {}", self.name).as_str());
+        let (_, field) = schema
+            .fields()
+            .find(&self.name)
+            .expect(&format!("No column named {}", self.name));
         field.clone()
     }
 }
 
-impl fmt::Display for ColumnExpr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Display for Column {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "#{}", self.name)
     }
 }
 
-struct LiteralStringExpr {
-    s: String,
+#[derive(Clone, Debug)]
+pub enum LiteralValue {
+    String(String),
+    Int64(i64),
+    Float64(f64),
+    Bool(bool),
 }
 
-impl LiteralStringExpr {
-    fn new(input: &str) -> Self {
-        LiteralStringExpr {
-            s: input.to_string(),
+pub struct Literal {
+    pub value: LiteralValue,
+}
+
+impl Literal {
+    pub fn string(s: &str) -> Self {
+        Literal {
+            value: LiteralValue::String(s.to_string()),
+        }
+    }
+
+    pub fn int(n: i64) -> Self {
+        Literal {
+            value: LiteralValue::Int64(n),
+        }
+    }
+
+    pub fn float(n: f64) -> Self {
+        Literal {
+            value: LiteralValue::Float64(n),
+        }
+    }
+
+    pub fn bool(b: bool) -> Self {
+        Literal {
+            value: LiteralValue::Bool(b),
         }
     }
 }
 
-impl fmt::Display for LiteralStringExpr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "'{}", self.s)
+impl LogicalExpr for Literal {
+    fn to_field(&self, _input: &dyn LogicalPlan) -> Arc<Field> {
+        let data_type = match &self.value {
+            LiteralValue::String(_) => DataType::Utf8,
+            LiteralValue::Int64(_) => DataType::Int64,
+            LiteralValue::Float64(_) => DataType::Float64,
+            LiteralValue::Bool(_) => DataType::Boolean,
+        };
+        Arc::new(Field::new(self.to_string(), data_type, false))
     }
 }
 
-impl LogicalExpr for LiteralStringExpr {
-    fn to_field(&self, input: Arc<dyn LogicalPlan>) -> Arc<Field> {
-        Arc::new(Field::new(&self.s, DataType::Utf8, false))
+impl fmt::Display for Literal {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.value {
+            LiteralValue::String(s) => write!(f, "'{}'", s),
+            LiteralValue::Int64(n) => write!(f, "{}", n),
+            LiteralValue::Float64(n) => write!(f, "{}", n),
+            LiteralValue::Bool(b) => write!(f, "{}", b),
+        }
     }
 }
 
-struct LiteralLong {
-    n: i64,
+#[derive(Debug, Clone, Copy)]
+pub enum BinaryOp {
+    // Comparison
+    Eq,
+    Neq,
+    Lt,
+    LtEq,
+    Gt,
+    GtEq,
+    // Boolean
+    And,
+    Or,
+    // Math
+    Add,
+    Sub,
+    Mul,
+    Div,
+    Mod,
 }
 
-impl fmt::Display for LiteralLong {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.n)
+impl BinaryOp {
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            BinaryOp::Eq => "=",
+            BinaryOp::Neq => "!=",
+            BinaryOp::Lt => "<",
+            BinaryOp::LtEq => "<=",
+            BinaryOp::Gt => ">",
+            BinaryOp::GtEq => ">=",
+            BinaryOp::And => "AND",
+            BinaryOp::Or => "OR",
+            BinaryOp::Add => "+",
+            BinaryOp::Sub => "-",
+            BinaryOp::Mul => "*",
+            BinaryOp::Div => "/",
+            BinaryOp::Mod => "%",
+        }
+    }
+
+    pub fn is_boolean_result(&self) -> bool {
+        matches!(
+            self,
+            BinaryOp::Eq
+                | BinaryOp::Neq
+                | BinaryOp::Lt
+                | BinaryOp::LtEq
+                | BinaryOp::Gt
+                | BinaryOp::GtEq
+                | BinaryOp::And
+                | BinaryOp::Or
+        )
     }
 }
 
-impl LogicalExpr for LiteralLong {
-    fn to_field(&self, input: Arc<dyn LogicalPlan>) -> Arc<Field> {
-        Arc::new(Field::new(self.n.to_string(), DataType::Int64, false))
-    }
+pub struct BinaryExpr {
+    pub left: Box<dyn LogicalExpr>,
+    pub op: BinaryOp,
+    pub right: Box<dyn LogicalExpr>,
 }
 
-struct LiteralDouble {
-    n: f64,
-}
-
-impl fmt::Display for LiteralDouble {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.n)
-    }
-}
-
-impl LogicalExpr for LiteralDouble {
-    fn to_field(&self, input: Arc<dyn LogicalPlan>) -> Arc<Field> {
-        Arc::new(Field::new(self.n.to_string(), DataType::Float64, false))
-    }
-}
-
-struct BinaryExpr<T: LogicalExpr> {
-    name: String,
-    op: String,
-    left: T,
-    right: T,
-}
-
-impl<T: LogicalExpr> BinaryExpr<T> {
-    fn new(name: &str, op: &str, left: T, right: T) -> Self {
+impl BinaryExpr {
+    pub fn new(
+        left: impl LogicalExpr + 'static,
+        op: BinaryOp,
+        right: impl LogicalExpr + 'static,
+    ) -> Self {
         BinaryExpr {
-            name: name.to_string(),
-            op: op.to_string(),
-            left,
-            right,
+            left: Box::new(left),
+            op,
+            right: Box::new(right),
+        }
+    }
+
+    pub fn eq(left: impl LogicalExpr + 'static, right: impl LogicalExpr + 'static) -> Self {
+        Self::new(left, BinaryOp::Eq, right)
+    }
+
+    pub fn neq(left: impl LogicalExpr + 'static, right: impl LogicalExpr + 'static) -> Self {
+        Self::new(left, BinaryOp::Neq, right)
+    }
+
+    pub fn gt(left: impl LogicalExpr + 'static, right: impl LogicalExpr + 'static) -> Self {
+        Self::new(left, BinaryOp::Gt, right)
+    }
+
+    pub fn lt(left: impl LogicalExpr + 'static, right: impl LogicalExpr + 'static) -> Self {
+        Self::new(left, BinaryOp::Lt, right)
+    }
+
+    pub fn and(left: impl LogicalExpr + 'static, right: impl LogicalExpr + 'static) -> Self {
+        Self::new(left, BinaryOp::And, right)
+    }
+
+    pub fn or(left: impl LogicalExpr + 'static, right: impl LogicalExpr + 'static) -> Self {
+        Self::new(left, BinaryOp::Or, right)
+    }
+
+    pub fn add(left: impl LogicalExpr + 'static, right: impl LogicalExpr + 'static) -> Self {
+        Self::new(left, BinaryOp::Add, right)
+    }
+
+    pub fn mul(left: impl LogicalExpr + 'static, right: impl LogicalExpr + 'static) -> Self {
+        Self::new(left, BinaryOp::Mul, right)
+    }
+}
+
+impl LogicalExpr for BinaryExpr {
+    fn to_field(&self, input: &dyn LogicalPlan) -> Arc<Field> {
+        if self.op.is_boolean_result() {
+            Arc::new(Field::new(self.to_string(), DataType::Boolean, false))
+        } else {
+            // use left operand's type (simplified)
+            self.left.to_field(input)
         }
     }
 }
 
-impl<T: LogicalExpr + fmt::Display> fmt::Display for BinaryExpr<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} {} {}", self.left, self.op, self.right)
+impl fmt::Display for BinaryExpr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {} {}", self.left, self.op.symbol(), self.right)
     }
 }
 
-struct AggregateExpr<T: LogicalExpr> {
-    name: String,
-    expr: T,
+pub struct Alias {
+    pub expr: Box<dyn LogicalExpr>,
+    pub alias: String,
 }
 
-impl<T: LogicalExpr> LogicalExpr for AggregateExpr<T> {
-    fn to_field(&self, input: Arc<dyn LogicalPlan>) -> Arc<Field> {
-        Arc::new(Field::new(
-            &self.name,
-            self.expr.to_field(input).data_type().clone(),
-            false,
-        ))
+impl Alias {
+    pub fn new(expr: impl LogicalExpr + 'static, alias: &str) -> Self {
+        Alias {
+            expr: Box::new(expr),
+            alias: alias.to_string(),
+        }
     }
 }
 
-impl<T: LogicalExpr> fmt::Display for AggregateExpr<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}({})", self.name, self.expr)
-    }
-}
-
-struct Alias<T: LogicalExpr> {
-    expr: T,
-    alias: String,
-}
-
-impl<T: LogicalExpr> LogicalExpr for Alias<T> {
-    fn to_field(&self, input: Arc<dyn LogicalPlan>) -> Arc<Field> {
+impl LogicalExpr for Alias {
+    fn to_field(&self, input: &dyn LogicalPlan) -> Arc<Field> {
+        let field = self.expr.to_field(input);
         Arc::new(Field::new(
             &self.alias,
-            self.expr.to_field(input).data_type().clone(),
-            false,
+            field.data_type().clone(),
+            field.is_nullable(),
         ))
     }
 }
 
-impl<T: LogicalExpr> fmt::Display for Alias<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{} as {}", self.expr, self.alias)
+impl fmt::Display for Alias {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} AS {}", self.expr, self.alias)
     }
 }
 
-struct Scan<D: DataSource> {
-    path: String,
-    data_source: D,
-    projection: Option<Vec<String>>,
+// Logical Plans
+
+pub struct Scan<D: DataSource> {
+    pub path: String,
+    pub data_source: D,
+    pub projection: Option<Vec<String>>,
     schema: Arc<Schema>,
 }
 
 impl<D: DataSource> Scan<D> {
-    fn new(path: &str, data_source: D, projection: Option<Vec<String>>) -> Self {
+    pub fn new(path: &str, data_source: D, projection: Option<Vec<String>>) -> Self {
+        let schema = data_source.schema().clone();
         Scan {
             path: path.to_string(),
-            data_source: data_source.clone(),
+            data_source,
             projection,
-            schema: data_source.schema().clone(),
+            schema,
         }
     }
 }
@@ -217,8 +299,7 @@ impl<D: DataSource> LogicalPlan for Scan<D> {
     }
 
     fn children(&self) -> Vec<Arc<dyn LogicalPlan>> {
-        let children: Vec<Arc<dyn LogicalPlan>> = Vec::new();
-        children
+        vec![]
     }
 
     fn format_node(&self) -> String {
@@ -230,24 +311,34 @@ impl<D: DataSource> LogicalPlan for Scan<D> {
 }
 
 impl<D: DataSource> Display for Scan<D> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.format_node())
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        format_plan(self, f, 0)
     }
 }
 
-struct Selection<E: LogicalExpr> {
-    input: Arc<dyn LogicalPlan>,
-    expr: E,
+// --- Selection (Filter) ---
+
+pub struct Selection {
+    pub input: Arc<dyn LogicalPlan>,
+    pub expr: Box<dyn LogicalExpr>,
 }
 
-impl<E: LogicalExpr> LogicalPlan for Selection<E> {
+impl Selection {
+    pub fn new(input: Arc<dyn LogicalPlan>, expr: impl LogicalExpr + 'static) -> Self {
+        Selection {
+            input,
+            expr: Box::new(expr),
+        }
+    }
+}
+
+impl LogicalPlan for Selection {
     fn schema(&self) -> Arc<Schema> {
-        self.input.schema().clone() // filtering doesn't change schema, only removes rows
+        self.input.schema()
     }
 
     fn children(&self) -> Vec<Arc<dyn LogicalPlan>> {
-        let children: Vec<Arc<dyn LogicalPlan>> = vec![self.input.clone()];
-        children
+        vec![self.input.clone()]
     }
 
     fn format_node(&self) -> String {
@@ -255,90 +346,47 @@ impl<E: LogicalExpr> LogicalPlan for Selection<E> {
     }
 }
 
-impl<E: LogicalExpr> Display for Selection<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.format_node())
+impl Display for Selection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        format_plan(self, f, 0)
     }
 }
 
-struct Projection<E: LogicalExpr> {
-    input: Arc<dyn LogicalPlan>,
-    expr: Vec<E>,
+// --- Projection ---
+
+pub struct Projection {
+    pub input: Arc<dyn LogicalPlan>,
+    pub expr: Vec<Box<dyn LogicalExpr>>,
 }
 
-impl<E: LogicalExpr> LogicalPlan for Projection<E> {
+impl Projection {
+    pub fn new(input: Arc<dyn LogicalPlan>, expr: Vec<Box<dyn LogicalExpr>>) -> Self {
+        Projection { input, expr }
+    }
+}
+
+impl LogicalPlan for Projection {
     fn schema(&self) -> Arc<Schema> {
         let fields: Vec<Arc<Field>> = self
             .expr
             .iter()
-            .map(|f| f.to_field(self.input.clone()))
+            .map(|e| e.to_field(self.input.as_ref()))
             .collect();
-        let schema = Schema::new(fields);
-        Arc::new(schema)
-    }
-
-    fn children(&self) -> Vec<Arc<dyn LogicalPlan>> {
-        let children: Vec<Arc<dyn LogicalPlan>> = vec![self.input.clone()];
-        children
-    }
-
-    fn format_node(&self) -> String {
-        format!(
-            "Projection: {:?}",
-            self.expr.iter().map(|e| e.to_string()).collect::<Vec<_>>()
-        )
-    }
-}
-
-impl<E: LogicalExpr> Display for Projection<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.format_node())
-    }
-}
-
-struct Aggregate<E: LogicalExpr> {
-    input: Arc<dyn LogicalPlan>,
-    group_expr: Vec<E>,
-    aggregate_expr: Vec<AggregateExpr<E>>,
-}
-
-impl<E: LogicalExpr> LogicalPlan for Aggregate<E> {
-    fn schema(&self) -> Arc<Schema> {
-        let group_iter = self
-            .group_expr
-            .iter()
-            .map(|f| f.to_field(self.input.clone()));
-        let aggregate_iter = self
-            .aggregate_expr
-            .iter()
-            .map(|f| f.to_field(self.input.clone()));
-
-        let fields: Vec<Arc<Field>> = chain(group_iter, aggregate_iter).collect();
         Arc::new(Schema::new(fields))
     }
 
     fn children(&self) -> Vec<Arc<dyn LogicalPlan>> {
-        let children: Vec<Arc<dyn LogicalPlan>> = vec![self.input.clone()];
-        children
+        vec![self.input.clone()]
     }
 
     fn format_node(&self) -> String {
-        format!(
-            "Aggregate: group_expr={:?}, aggregate_expr={:?}",
-            self.group_expr
-                .iter()
-                .map(|e| e.to_string())
-                .collect::<Vec<_>>(),
-            self.aggregate_expr
-                .iter()
-                .map(|e| e.to_string())
-                .collect::<Vec<_>>()
-        )
+        let exprs: Vec<String> = self.expr.iter().map(|e| e.to_string()).collect();
+        format!("Projection: {}", exprs.join(", "))
     }
 }
 
-impl<E: LogicalExpr> Display for Aggregate<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.format_node())
+impl Display for Projection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        format_plan(self, f, 0)
     }
 }
