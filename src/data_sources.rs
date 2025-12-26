@@ -7,7 +7,7 @@ use arrow::{
 use parquet::arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder};
 use std::{fmt::Display, fs::File, sync::Arc};
 
-pub trait DataSource: Display + Clone {
+pub trait DataSource: Display {
     fn schema(&self) -> Arc<Schema>;
 
     fn scan(
@@ -108,7 +108,7 @@ pub struct ParquetDataSource {
 }
 
 impl ParquetDataSource {
-    fn try_new(filename: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn try_new(filename: &str) -> Result<Self, Box<dyn std::error::Error>> {
         let file = File::open(filename).unwrap();
         let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
 

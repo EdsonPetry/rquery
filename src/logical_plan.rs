@@ -118,6 +118,7 @@ impl fmt::Display for Literal {
     }
 }
 
+// BINARY OPERATORS
 #[derive(Debug, Clone, Copy)]
 pub enum BinaryOp {
     // Comparison
@@ -241,6 +242,86 @@ impl fmt::Display for BinaryExpr {
     }
 }
 
+// AGGREGATE EXPRESSIONS
+#[derive(Debug, Clone, Copy)]
+pub enum AggregateOp {
+    Sum,
+    Min,
+    Max,
+    Avg,
+    Count,
+}
+
+impl AggregateOp {
+    pub fn symbol(&self) -> &'static str {
+        match self {
+            AggregateOp::Sum => "SUM",
+            AggregateOp::Min => "MIN",
+            AggregateOp::Max => "MAX",
+            AggregateOp::Avg => "AVG",
+            AggregateOp::Count => "COUNT",
+        }
+    }
+}
+
+pub struct AggregateExpr {
+    op: AggregateOp,
+    expr: Box<dyn LogicalExpr>,
+}
+
+impl AggregateExpr {
+    pub fn new(op: AggregateOp, expr: impl LogicalExpr + 'static) -> Self {
+        AggregateExpr {
+            op,
+            expr: Box::new(expr),
+        }
+    }
+
+    pub fn sum(expr: impl LogicalExpr + 'static) -> Self {
+        Self::new(AggregateOp::Sum, expr)
+    }
+
+    pub fn min(expr: impl LogicalExpr + 'static) -> Self {
+        Self::new(AggregateOp::Min, expr)
+    }
+
+    pub fn max(expr: impl LogicalExpr + 'static) -> Self {
+        Self::new(AggregateOp::Max, expr)
+    }
+
+    pub fn avg(expr: impl LogicalExpr + 'static) -> Self {
+        Self::new(AggregateOp::Avg, expr)
+    }
+
+    pub fn count(expr: impl LogicalExpr + 'static) -> Self {
+        Self::new(AggregateOp::Count, expr)
+    }
+}
+
+impl LogicalExpr for AggregateExpr {
+    fn to_field(&self, input: &dyn LogicalPlan) -> Arc<Field> {
+        let inner_field = self.expr.to_field(input);
+
+        let data_type = match self.op {
+            AggregateOp::Count => DataType::Int64,
+            AggregateOp::Avg => DataType::Float64,
+            // Sum, Min, Max preserve the input type
+            AggregateOp::Sum | AggregateOp::Min | AggregateOp::Max => {
+                inner_field.data_type().clone()
+            }
+        };
+
+        let name = format!("{}({})", self.op.symbol(), self.expr);
+        Arc::new(Field::new(&name, data_type, true))
+    }
+}
+
+impl Display for AggregateExpr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}({})", self.op.symbol(), self.expr)
+    }
+}
+
 pub struct Alias {
     pub expr: Box<dyn LogicalExpr>,
     pub alias: String,
@@ -272,17 +353,21 @@ impl fmt::Display for Alias {
     }
 }
 
-// Logical Plans
+// ================== SCAN ==============
 
-pub struct Scan<D: DataSource> {
+pub struct Scan {
     pub path: String,
-    pub data_source: D,
+    pub data_source: Box<dyn DataSource>,
     pub projection: Option<Vec<String>>,
     schema: Arc<Schema>,
 }
 
-impl<D: DataSource> Scan<D> {
-    pub fn new(path: &str, data_source: D, projection: Option<Vec<String>>) -> Self {
+impl Scan {
+    pub fn new(
+        path: &str,
+        data_source: Box<dyn DataSource>,
+        projection: Option<Vec<String>>,
+    ) -> Self {
         let schema = data_source.schema().clone();
         Scan {
             path: path.to_string(),
@@ -293,7 +378,7 @@ impl<D: DataSource> Scan<D> {
     }
 }
 
-impl<D: DataSource> LogicalPlan for Scan<D> {
+impl LogicalPlan for Scan {
     fn schema(&self) -> Arc<Schema> {
         self.schema.clone()
     }
@@ -310,13 +395,13 @@ impl<D: DataSource> LogicalPlan for Scan<D> {
     }
 }
 
-impl<D: DataSource> Display for Scan<D> {
+impl Display for Scan {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         format_plan(self, f, 0)
     }
 }
 
-// --- Selection (Filter) ---
+// ============== SELECTION ===============
 
 pub struct Selection {
     pub input: Arc<dyn LogicalPlan>,
@@ -352,7 +437,7 @@ impl Display for Selection {
     }
 }
 
-// --- Projection ---
+// ================= PROJECTION ===============
 
 pub struct Projection {
     pub input: Arc<dyn LogicalPlan>,
@@ -386,6 +471,68 @@ impl LogicalPlan for Projection {
 }
 
 impl Display for Projection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        format_plan(self, f, 0)
+    }
+}
+
+// ================= AGGREGATE ===============
+
+pub struct Aggregate {
+    pub input: Arc<dyn LogicalPlan>,
+    pub group_expr: Vec<Box<dyn LogicalExpr>>,
+    pub aggregate_expr: Vec<AggregateExpr>,
+}
+
+impl Aggregate {
+    pub fn new(
+        input: Arc<dyn LogicalPlan>,
+        group_expr: Vec<Box<dyn LogicalExpr>>,
+        aggregate_expr: Vec<AggregateExpr>,
+    ) -> Self {
+        Aggregate {
+            input,
+            group_expr,
+            aggregate_expr,
+        }
+    }
+}
+
+impl LogicalPlan for Aggregate {
+    fn schema(&self) -> Arc<Schema> {
+        let mut fields: Vec<Arc<Field>> = self
+            .group_expr
+            .iter()
+            .map(|e| e.to_field(self.input.as_ref()))
+            .collect();
+
+        let agg_fields: Vec<Arc<Field>> = self
+            .aggregate_expr
+            .iter()
+            .map(|e| e.to_field(self.input.as_ref()))
+            .collect();
+
+        fields.extend(agg_fields);
+        Arc::new(Schema::new(fields))
+    }
+
+    fn children(&self) -> Vec<Arc<dyn LogicalPlan>> {
+        vec![self.input.clone()]
+    }
+
+    fn format_node(&self) -> String {
+        let group_exprs: Vec<String> = self.group_expr.iter().map(|e| e.to_string()).collect();
+        let agg_exprs: Vec<String> = self.aggregate_expr.iter().map(|e| e.to_string()).collect();
+
+        format!(
+            "Aggregate: groupBy=[{}], aggr=[{}]",
+            group_exprs.join(", "),
+            agg_exprs.join(", ")
+        )
+    }
+}
+
+impl Display for Aggregate {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         format_plan(self, f, 0)
     }
