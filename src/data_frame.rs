@@ -89,7 +89,7 @@ mod tests {
 
     use super::*;
     use crate::data_sources::InMemoryDataSource;
-    use crate::logical_plan::{AggregateExpr, Alias, BinaryExpr, Column, Literal, LogicalPlan};
+    use crate::logical_plan::{AggregateExpr, Alias, Binary, Column, Literal, LogicalPlan};
 
     fn create_test_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -192,7 +192,7 @@ mod tests {
             #[test]
             fn projection_with_expressions() {
                 let df = create_test_dataframe();
-                let projected = df.project(vec![Box::new(BinaryExpr::add(
+                let projected = df.project(vec![Box::new(Binary::add(
                     Column::new("salary"),
                     Literal::float(1000.0),
                 ))]);
@@ -218,7 +218,7 @@ mod tests {
             #[test]
             fn creates_selection_plan() {
                 let df = create_test_dataframe();
-                let filtered = df.filter(BinaryExpr::eq(Column::new("age"), Literal::int(30)));
+                let filtered = df.filter(Binary::eq(Column::new("age"), Literal::int(30)));
 
                 let output = format!("{}", filtered);
                 assert!(output.contains("Filter: #age = 30"));
@@ -229,7 +229,7 @@ mod tests {
                 let df = create_test_dataframe();
                 let original_schema = df.schema();
 
-                let filtered = df.filter(BinaryExpr::gt(Column::new("age"), Literal::int(25)));
+                let filtered = df.filter(Binary::gt(Column::new("age"), Literal::int(25)));
 
                 assert_eq!(filtered.schema(), original_schema);
             }
@@ -237,9 +237,9 @@ mod tests {
             #[test]
             fn filter_with_and_condition() {
                 let df = create_test_dataframe();
-                let filtered = df.filter(BinaryExpr::and(
-                    BinaryExpr::gt(Column::new("age"), Literal::int(25)),
-                    BinaryExpr::eq(Column::new("active"), Literal::bool(true)),
+                let filtered = df.filter(Binary::and(
+                    Binary::gt(Column::new("age"), Literal::int(25)),
+                    Binary::eq(Column::new("active"), Literal::bool(true)),
                 ));
 
                 let output = format!("{}", filtered);
@@ -249,9 +249,9 @@ mod tests {
             #[test]
             fn filter_with_or_condition() {
                 let df = create_test_dataframe();
-                let filtered = df.filter(BinaryExpr::or(
-                    BinaryExpr::eq(Column::new("name"), Literal::string("Alice")),
-                    BinaryExpr::eq(Column::new("name"), Literal::string("Bob")),
+                let filtered = df.filter(Binary::or(
+                    Binary::eq(Column::new("name"), Literal::string("Alice")),
+                    Binary::eq(Column::new("name"), Literal::string("Bob")),
                 ));
 
                 let output = format!("{}", filtered);
@@ -261,8 +261,7 @@ mod tests {
             #[test]
             fn filter_preserves_input_plan() {
                 let df = create_test_dataframe();
-                let filtered =
-                    df.filter(BinaryExpr::eq(Column::new("active"), Literal::bool(true)));
+                let filtered = df.filter(Binary::eq(Column::new("active"), Literal::bool(true)));
 
                 let output = format!("{}", filtered);
                 assert!(output.contains("Scan: "));
@@ -423,7 +422,7 @@ mod tests {
             fn displays_chained_operations() {
                 let df = create_test_dataframe();
                 let result = df
-                    .filter(BinaryExpr::gt(Column::new("age"), Literal::int(25)))
+                    .filter(Binary::gt(Column::new("age"), Literal::int(25)))
                     .project(vec![
                         Box::new(Column::new("name")),
                         Box::new(Column::new("salary")),
@@ -443,7 +442,7 @@ mod tests {
             fn filter_then_project() {
                 let df = create_test_dataframe();
                 let result = df
-                    .filter(BinaryExpr::eq(Column::new("active"), Literal::bool(true)))
+                    .filter(Binary::eq(Column::new("active"), Literal::bool(true)))
                     .project(vec![Box::new(Column::new("name"))]);
 
                 let output = format!("{}", result);
@@ -463,7 +462,7 @@ mod tests {
                         Box::new(Column::new("name")),
                         Box::new(Column::new("age")),
                     ])
-                    .filter(BinaryExpr::gt(Column::new("age"), Literal::int(25)));
+                    .filter(Binary::gt(Column::new("age"), Literal::int(25)));
 
                 let output = format!("{}", result);
 
@@ -477,7 +476,7 @@ mod tests {
             fn filter_then_aggregate() {
                 let df = create_test_dataframe();
                 let result = df
-                    .filter(BinaryExpr::gt(Column::new("age"), Literal::int(25)))
+                    .filter(Binary::gt(Column::new("age"), Literal::int(25)))
                     .aggregate(
                         vec![Box::new(Column::new("active"))],
                         vec![AggregateExpr::sum(Column::new("salary"))],
@@ -495,9 +494,9 @@ mod tests {
             fn multiple_filters() {
                 let df = create_test_dataframe();
                 let result = df
-                    .filter(BinaryExpr::gt(Column::new("age"), Literal::int(20)))
-                    .filter(BinaryExpr::lt(Column::new("age"), Literal::int(40)))
-                    .filter(BinaryExpr::eq(Column::new("active"), Literal::bool(true)));
+                    .filter(Binary::gt(Column::new("age"), Literal::int(20)))
+                    .filter(Binary::lt(Column::new("age"), Literal::int(40)))
+                    .filter(Binary::eq(Column::new("active"), Literal::bool(true)));
 
                 let output = format!("{}", result);
 
@@ -515,9 +514,9 @@ mod tests {
 
                 let df = create_test_dataframe();
                 let result = df
-                    .filter(BinaryExpr::and(
-                        BinaryExpr::gt(Column::new("age"), Literal::int(25)),
-                        BinaryExpr::eq(Column::new("active"), Literal::bool(true)),
+                    .filter(Binary::and(
+                        Binary::gt(Column::new("age"), Literal::int(25)),
+                        Binary::eq(Column::new("active"), Literal::bool(true)),
                     ))
                     .aggregate(
                         vec![Box::new(Column::new("name"))],
@@ -562,7 +561,7 @@ mod tests {
             // WHERE department = 'Engineering'
             let df = ctx
                 .csv(&file_path.to_string_lossy(), b';', true)
-                .filter(BinaryExpr::eq(
+                .filter(Binary::eq(
                     Column::new("department"),
                     Literal::string("Engineering"),
                 ))
@@ -636,7 +635,7 @@ mod tests {
             // GROUP BY customer
             let df = ctx
                 .csv(&file_path.to_string_lossy(), b';', true)
-                .filter(BinaryExpr::eq(
+                .filter(Binary::eq(
                     Column::new("status"),
                     Literal::string("completed"),
                 ))
@@ -673,7 +672,7 @@ mod tests {
             let df1 = ctx.csv(&file_path.to_string_lossy(), b';', true);
 
             // Create two different transformations from the same base
-            let df2 = df1.filter(BinaryExpr::eq(Column::new("a"), Literal::int(1)));
+            let df2 = df1.filter(Binary::eq(Column::new("a"), Literal::int(1)));
             let df3 = df1.project(vec![Box::new(Column::new("b"))]);
 
             // Original should still be a simple scan

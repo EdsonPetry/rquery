@@ -22,7 +22,25 @@ fn format_plan(plan: &dyn LogicalPlan, f: &mut fmt::Formatter<'_>, indent: usize
     Ok(())
 }
 
-// Logical Expressions
+// ============= Logical Expressions ================
+// RQuery provides support for the following expression types:
+// Literal values ("hello", 12.34, true)
+// Column references (user_id, first_name, salary)
+// Binary expressions:
+//      Math expressions (salary * 0.1, price + tax)
+//      Comparison expressions (age >= 21, status != 'inactive')
+//      Boolean expressions (age >= 21 AND country = 'US')
+// Aggregate functions (MIN(salary), MAX(salary), SUM(amount), COUNT(*))
+// Scalar functions (UPPER(name), CONCAT(first_name, ' ', last_name))
+// Aliased expressions (salary * 1.1 AS new_salary)
+
+pub enum Expr {
+    Literal(Literal),
+    Column(Column),
+    Binary(Binary),
+    Aggregate(Aggregate),
+    Alias(Alias),
+}
 
 pub trait LogicalExpr: fmt::Display {
     fn to_field(&self, input: &dyn LogicalPlan) -> Arc<Field>;
@@ -173,19 +191,19 @@ impl BinaryOp {
     }
 }
 
-pub struct BinaryExpr {
+pub struct Binary {
     pub left: Box<dyn LogicalExpr>,
     pub op: BinaryOp,
     pub right: Box<dyn LogicalExpr>,
 }
 
-impl BinaryExpr {
+impl Binary {
     pub fn new(
         left: impl LogicalExpr + 'static,
         op: BinaryOp,
         right: impl LogicalExpr + 'static,
     ) -> Self {
-        BinaryExpr {
+        Binary {
             left: Box::new(left),
             op,
             right: Box::new(right),
@@ -225,7 +243,7 @@ impl BinaryExpr {
     }
 }
 
-impl LogicalExpr for BinaryExpr {
+impl LogicalExpr for Binary {
     fn to_field(&self, input: &dyn LogicalPlan) -> Arc<Field> {
         if self.op.is_boolean_result() {
             Arc::new(Field::new(self.to_string(), DataType::Boolean, false))
@@ -236,7 +254,7 @@ impl LogicalExpr for BinaryExpr {
     }
 }
 
-impl fmt::Display for BinaryExpr {
+impl fmt::Display for Binary {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} {} {}", self.left, self.op.symbol(), self.right)
     }
@@ -814,49 +832,49 @@ mod tests {
 
             #[test]
             fn eq_creates_equality_expression() {
-                let expr = BinaryExpr::eq(Column::new("a"), Literal::int(1));
+                let expr = Binary::eq(Column::new("a"), Literal::int(1));
                 assert!(matches!(expr.op, BinaryOp::Eq));
             }
 
             #[test]
             fn neq_creates_not_equal_expression() {
-                let expr = BinaryExpr::neq(Column::new("a"), Literal::int(1));
+                let expr = Binary::neq(Column::new("a"), Literal::int(1));
                 assert!(matches!(expr.op, BinaryOp::Neq));
             }
 
             #[test]
             fn gt_creates_greater_than_expression() {
-                let expr = BinaryExpr::gt(Column::new("a"), Literal::int(1));
+                let expr = Binary::gt(Column::new("a"), Literal::int(1));
                 assert!(matches!(expr.op, BinaryOp::Gt));
             }
 
             #[test]
             fn lt_creates_less_than_expression() {
-                let expr = BinaryExpr::lt(Column::new("a"), Literal::int(1));
+                let expr = Binary::lt(Column::new("a"), Literal::int(1));
                 assert!(matches!(expr.op, BinaryOp::Lt));
             }
 
             #[test]
             fn and_creates_and_expression() {
-                let expr = BinaryExpr::and(Literal::bool(true), Literal::bool(false));
+                let expr = Binary::and(Literal::bool(true), Literal::bool(false));
                 assert!(matches!(expr.op, BinaryOp::And));
             }
 
             #[test]
             fn or_creates_or_expression() {
-                let expr = BinaryExpr::or(Literal::bool(true), Literal::bool(false));
+                let expr = Binary::or(Literal::bool(true), Literal::bool(false));
                 assert!(matches!(expr.op, BinaryOp::Or));
             }
 
             #[test]
             fn add_creates_addition_expression() {
-                let expr = BinaryExpr::add(Column::new("a"), Literal::int(1));
+                let expr = Binary::add(Column::new("a"), Literal::int(1));
                 assert!(matches!(expr.op, BinaryOp::Add));
             }
 
             #[test]
             fn mul_creates_multiplication_expression() {
-                let expr = BinaryExpr::mul(Column::new("a"), Literal::int(2));
+                let expr = Binary::mul(Column::new("a"), Literal::int(2));
                 assert!(matches!(expr.op, BinaryOp::Mul));
             }
         }
@@ -866,20 +884,20 @@ mod tests {
 
             #[test]
             fn formats_comparison_correctly() {
-                let expr = BinaryExpr::eq(Column::new("age"), Literal::int(30));
+                let expr = Binary::eq(Column::new("age"), Literal::int(30));
                 assert_eq!(format!("{}", expr), "#age = 30");
             }
 
             #[test]
             fn formats_math_correctly() {
-                let expr = BinaryExpr::add(Column::new("salary"), Literal::float(1000.0));
+                let expr = Binary::add(Column::new("salary"), Literal::float(1000.0));
                 assert_eq!(format!("{}", expr), "#salary + 1000");
             }
 
             #[test]
             fn formats_nested_expressions() {
-                let inner = BinaryExpr::add(Column::new("a"), Literal::int(1));
-                let outer = BinaryExpr::mul(inner, Literal::int(2));
+                let inner = Binary::add(Column::new("a"), Literal::int(1));
+                let outer = Binary::mul(inner, Literal::int(2));
                 assert_eq!(format!("{}", outer), "#a + 1 * 2");
             }
         }
@@ -890,7 +908,7 @@ mod tests {
             #[test]
             fn comparison_returns_boolean_field() {
                 let scan = create_test_scan();
-                let expr = BinaryExpr::eq(Column::new("age"), Literal::int(30));
+                let expr = Binary::eq(Column::new("age"), Literal::int(30));
                 let field = expr.to_field(scan.as_ref());
 
                 assert_eq!(field.data_type(), &DataType::Boolean);
@@ -899,9 +917,9 @@ mod tests {
             #[test]
             fn logical_returns_boolean_field() {
                 let scan = create_test_scan();
-                let expr = BinaryExpr::and(
-                    BinaryExpr::eq(Column::new("age"), Literal::int(30)),
-                    BinaryExpr::eq(Column::new("active"), Literal::bool(true)),
+                let expr = Binary::and(
+                    Binary::eq(Column::new("age"), Literal::int(30)),
+                    Binary::eq(Column::new("active"), Literal::bool(true)),
                 );
                 let field = expr.to_field(scan.as_ref());
 
@@ -912,13 +930,13 @@ mod tests {
             fn math_preserves_left_operand_type() {
                 let scan = create_test_scan();
 
-                let int_expr = BinaryExpr::add(Column::new("age"), Literal::int(1));
+                let int_expr = Binary::add(Column::new("age"), Literal::int(1));
                 assert_eq!(
                     int_expr.to_field(scan.as_ref()).data_type(),
                     &DataType::Int64
                 );
 
-                let float_expr = BinaryExpr::mul(Column::new("salary"), Literal::float(1.1));
+                let float_expr = Binary::mul(Column::new("salary"), Literal::float(1.1));
                 assert_eq!(
                     float_expr.to_field(scan.as_ref()).data_type(),
                     &DataType::Float64
@@ -1099,7 +1117,7 @@ mod tests {
         #[test]
         fn works_with_complex_expressions() {
             let scan = create_test_scan();
-            let expr = BinaryExpr::add(Column::new("salary"), Literal::float(1000.0));
+            let expr = Binary::add(Column::new("salary"), Literal::float(1000.0));
             let alias = Alias::new(expr, "adjusted_salary");
 
             let field = alias.to_field(scan.as_ref());
@@ -1163,7 +1181,7 @@ mod tests {
         #[test]
         fn new_creates_selection_with_input_and_expr() {
             let scan = create_test_scan();
-            let expr = BinaryExpr::eq(Column::new("age"), Literal::int(30));
+            let expr = Binary::eq(Column::new("age"), Literal::int(30));
             let selection = Selection::new(scan, expr);
 
             assert!(!selection.children().is_empty());
@@ -1172,7 +1190,7 @@ mod tests {
         #[test]
         fn schema_passes_through_input_schema() {
             let scan = create_test_scan();
-            let expr = BinaryExpr::eq(Column::new("age"), Literal::int(30));
+            let expr = Binary::eq(Column::new("age"), Literal::int(30));
             let selection = Selection::new(scan.clone(), expr);
 
             assert_eq!(selection.schema(), scan.schema());
@@ -1181,7 +1199,7 @@ mod tests {
         #[test]
         fn children_returns_input() {
             let scan = create_test_scan();
-            let expr = BinaryExpr::eq(Column::new("age"), Literal::int(30));
+            let expr = Binary::eq(Column::new("age"), Literal::int(30));
             let selection = Selection::new(scan, expr);
 
             assert_eq!(selection.children().len(), 1);
@@ -1190,7 +1208,7 @@ mod tests {
         #[test]
         fn format_node_shows_filter_expression() {
             let scan = create_test_scan();
-            let expr = BinaryExpr::eq(Column::new("age"), Literal::int(30));
+            let expr = Binary::eq(Column::new("age"), Literal::int(30));
             let selection = Selection::new(scan, expr);
 
             assert_eq!(selection.format_node(), "Filter: #age = 30");
@@ -1199,7 +1217,7 @@ mod tests {
         #[test]
         fn display_shows_hierarchical_plan() {
             let scan = create_test_scan();
-            let expr = BinaryExpr::eq(Column::new("age"), Literal::int(30));
+            let expr = Binary::eq(Column::new("age"), Literal::int(30));
             let selection = Selection::new(scan, expr);
 
             let output = format!("{}", selection);
@@ -1250,7 +1268,7 @@ mod tests {
         #[test]
         fn schema_handles_expressions() {
             let scan = create_test_scan();
-            let exprs: Vec<Box<dyn LogicalExpr>> = vec![Box::new(BinaryExpr::add(
+            let exprs: Vec<Box<dyn LogicalExpr>> = vec![Box::new(Binary::add(
                 Column::new("salary"),
                 Literal::float(1000.0),
             ))];
@@ -1408,9 +1426,9 @@ mod tests {
             // WHERE age > 25 AND active = true
 
             let scan = create_test_scan();
-            let filter_expr = BinaryExpr::and(
-                BinaryExpr::gt(Column::new("age"), Literal::int(25)),
-                BinaryExpr::eq(Column::new("active"), Literal::bool(true)),
+            let filter_expr = Binary::and(
+                Binary::gt(Column::new("age"), Literal::int(25)),
+                Binary::eq(Column::new("active"), Literal::bool(true)),
             );
             let selection = Selection::new(scan, filter_expr);
 
@@ -1437,8 +1455,7 @@ mod tests {
             // GROUP BY active
 
             let scan = create_test_scan();
-            let selection =
-                Selection::new(scan, BinaryExpr::gt(Column::new("age"), Literal::int(25)));
+            let selection = Selection::new(scan, Binary::gt(Column::new("age"), Literal::int(25)));
 
             let aggregate = Aggregate::new(
                 Arc::new(selection),
@@ -1465,17 +1482,15 @@ mod tests {
             // WHERE active = true
 
             let scan = create_test_scan();
-            let selection = Selection::new(
-                scan,
-                BinaryExpr::eq(Column::new("active"), Literal::bool(true)),
-            );
+            let selection =
+                Selection::new(scan, Binary::eq(Column::new("active"), Literal::bool(true)));
 
             let projection = Projection::new(
                 Arc::new(selection),
                 vec![
                     Box::new(Alias::new(Column::new("name"), "employee_name")),
                     Box::new(Alias::new(
-                        BinaryExpr::add(Column::new("salary"), Literal::float(1000.0)),
+                        Binary::add(Column::new("salary"), Literal::float(1000.0)),
                         "adjusted_salary",
                     )),
                 ],
@@ -1493,11 +1508,10 @@ mod tests {
         #[test]
         fn deeply_nested_plan_maintains_correct_indentation() {
             let scan = create_test_scan();
-            let filter1 =
-                Selection::new(scan, BinaryExpr::gt(Column::new("age"), Literal::int(20)));
+            let filter1 = Selection::new(scan, Binary::gt(Column::new("age"), Literal::int(20)));
             let filter2 = Selection::new(
                 Arc::new(filter1),
-                BinaryExpr::lt(Column::new("age"), Literal::int(40)),
+                Binary::lt(Column::new("age"), Literal::int(40)),
             );
             let projection =
                 Projection::new(Arc::new(filter2), vec![Box::new(Column::new("name"))]);
