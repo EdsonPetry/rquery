@@ -5,32 +5,32 @@ use arrow::datatypes::Schema;
 use crate::{
     data_sources::{CsvDataSource, ParquetDataSource},
     logical_plan::{
-        Aggregate, AggregateExpr, LogicalExpr, LogicalPlan, Projection, Scan, Selection,
+        Aggregate, AggregateExpr, Expr, LogicalPlan, Plan, Projection, Scan, Selection,
     },
 };
 
 pub struct DataFrame {
-    plan: Arc<dyn LogicalPlan>,
+    plan: Arc<Plan>,
 }
 
 impl DataFrame {
-    pub fn project(&self, expr: Vec<Box<dyn LogicalExpr>>) -> Self {
+    pub fn project(&self, expr: Vec<Expr>) -> Self {
         DataFrame {
-            plan: Arc::new(Projection::new(self.plan.clone(), expr)),
+            plan: Arc::new(Plan::Projection(Projection::new(self.plan.clone(), expr))),
         }
     }
-    pub fn filter(&self, expr: impl LogicalExpr + 'static) -> Self {
+    pub fn filter(&self, expr: Expr) -> Self {
         DataFrame {
-            plan: Arc::new(Selection::new(self.plan.clone(), expr)),
+            plan: Arc::new(Plan::Selection(Selection::new(self.plan.clone(), expr))),
         }
     }
-    pub fn aggregate(
-        &self,
-        group_by: Vec<Box<dyn LogicalExpr>>,
-        aggregate_expr: Vec<AggregateExpr>,
-    ) -> Self {
+    pub fn aggregate(&self, group_by: Vec<Expr>, aggregate_expr: Vec<AggregateExpr>) -> Self {
         DataFrame {
-            plan: Arc::new(Aggregate::new(self.plan.clone(), group_by, aggregate_expr)),
+            plan: Arc::new(Plan::Aggregate(Aggregate::new(
+                self.plan.clone(),
+                group_by,
+                aggregate_expr,
+            ))),
         }
     }
     pub fn schema(&self) -> Arc<Schema> {
@@ -56,11 +56,11 @@ impl ExecutionContext {
     }
 
     pub fn csv(&self, filename: &str, delimiter: u8, header: bool) -> DataFrame {
-        let plan = Scan::new(
+        let plan = Plan::Scan(Scan::new(
             filename,
             Box::new(CsvDataSource::try_new(filename.to_string(), delimiter, header).unwrap()),
             None,
-        );
+        ));
 
         DataFrame {
             plan: Arc::new(plan),
@@ -68,11 +68,11 @@ impl ExecutionContext {
     }
 
     pub fn parquet(&self, filename: &str) -> DataFrame {
-        let plan = Scan::new(
+        let plan = Plan::Scan(Scan::new(
             filename,
             Box::new(ParquetDataSource::try_new(filename).unwrap()),
             None,
-        );
+        ));
         DataFrame {
             plan: Arc::new(plan),
         }
@@ -89,7 +89,7 @@ mod tests {
 
     use super::*;
     use crate::data_sources::InMemoryDataSource;
-    use crate::logical_plan::{AggregateExpr, Alias, Binary, Column, Literal, LogicalPlan};
+    use crate::logical_plan::{AggregateExpr, Alias, Binary, Column, Literal};
 
     fn create_test_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -140,7 +140,7 @@ mod tests {
 
     #[cfg(test)]
     impl DataFrame {
-        pub fn from_plan_for_test(plan: Arc<dyn LogicalPlan>) -> Self {
+        pub fn from_plan_for_test(plan: Arc<Plan>) -> Self {
             DataFrame { plan }
         }
     }
@@ -155,8 +155,8 @@ mod tests {
             fn creates_projection_plan() {
                 let df = create_test_dataframe();
                 let projected = df.project(vec![
-                    Box::new(Column::new("id")),
-                    Box::new(Column::new("name")),
+                    Expr::Column(Column::new("id")),
+                    Expr::Column(Column::new("name")),
                 ]);
 
                 let output = format!("{}", projected);
@@ -167,8 +167,8 @@ mod tests {
             fn projection_schema_contains_selected_columns() {
                 let df = create_test_dataframe();
                 let projected = df.project(vec![
-                    Box::new(Column::new("id")),
-                    Box::new(Column::new("name")),
+                    Expr::Column(Column::new("id")),
+                    Expr::Column(Column::new("name")),
                 ]);
 
                 let schema = projected.schema();
@@ -182,8 +182,10 @@ mod tests {
             #[test]
             fn projection_with_alias() {
                 let df = create_test_dataframe();
-                let projected =
-                    df.project(vec![Box::new(Alias::new(Column::new("name"), "full_name"))]);
+                let projected = df.project(vec![Expr::Alias(Alias::new(
+                    Expr::Column(Column::new("name")),
+                    "full_name",
+                ))]);
 
                 let schema = projected.schema();
                 assert_eq!(schema.fields()[0].name(), "full_name");
@@ -192,9 +194,9 @@ mod tests {
             #[test]
             fn projection_with_expressions() {
                 let df = create_test_dataframe();
-                let projected = df.project(vec![Box::new(Binary::add(
-                    Column::new("salary"),
-                    Literal::float(1000.0),
+                let projected = df.project(vec![Expr::Binary(Binary::add(
+                    Expr::Column(Column::new("salary")),
+                    Expr::Literal(Literal::float(1000.0)),
                 ))]);
 
                 let schema = projected.schema();
@@ -204,7 +206,7 @@ mod tests {
             #[test]
             fn projection_preserves_input_plan() {
                 let df = create_test_dataframe();
-                let projected = df.project(vec![Box::new(Column::new("id"))]);
+                let projected = df.project(vec![Expr::Column(Column::new("id"))]);
 
                 let output = format!("{}", projected);
                 assert!(output.contains("Scan: "));
@@ -218,7 +220,10 @@ mod tests {
             #[test]
             fn creates_selection_plan() {
                 let df = create_test_dataframe();
-                let filtered = df.filter(Binary::eq(Column::new("age"), Literal::int(30)));
+                let filtered = df.filter(Expr::Binary(Binary::eq(
+                    Expr::Column(Column::new("age")),
+                    Expr::Literal(Literal::int(30)),
+                )));
 
                 let output = format!("{}", filtered);
                 assert!(output.contains("Filter: #age = 30"));
@@ -229,7 +234,10 @@ mod tests {
                 let df = create_test_dataframe();
                 let original_schema = df.schema();
 
-                let filtered = df.filter(Binary::gt(Column::new("age"), Literal::int(25)));
+                let filtered = df.filter(Expr::Binary(Binary::gt(
+                    Expr::Column(Column::new("age")),
+                    Expr::Literal(Literal::int(25)),
+                )));
 
                 assert_eq!(filtered.schema(), original_schema);
             }
@@ -237,10 +245,16 @@ mod tests {
             #[test]
             fn filter_with_and_condition() {
                 let df = create_test_dataframe();
-                let filtered = df.filter(Binary::and(
-                    Binary::gt(Column::new("age"), Literal::int(25)),
-                    Binary::eq(Column::new("active"), Literal::bool(true)),
-                ));
+                let filtered = df.filter(Expr::Binary(Binary::and(
+                    Expr::Binary(Binary::gt(
+                        Expr::Column(Column::new("age")),
+                        Expr::Literal(Literal::int(25)),
+                    )),
+                    Expr::Binary(Binary::eq(
+                        Expr::Column(Column::new("active")),
+                        Expr::Literal(Literal::bool(true)),
+                    )),
+                )));
 
                 let output = format!("{}", filtered);
                 assert!(output.contains("Filter: #age > 25 AND #active = true"));
@@ -249,10 +263,16 @@ mod tests {
             #[test]
             fn filter_with_or_condition() {
                 let df = create_test_dataframe();
-                let filtered = df.filter(Binary::or(
-                    Binary::eq(Column::new("name"), Literal::string("Alice")),
-                    Binary::eq(Column::new("name"), Literal::string("Bob")),
-                ));
+                let filtered = df.filter(Expr::Binary(Binary::or(
+                    Expr::Binary(Binary::eq(
+                        Expr::Column(Column::new("name")),
+                        Expr::Literal(Literal::string("Alice")),
+                    )),
+                    Expr::Binary(Binary::eq(
+                        Expr::Column(Column::new("name")),
+                        Expr::Literal(Literal::string("Bob")),
+                    )),
+                )));
 
                 let output = format!("{}", filtered);
                 assert!(output.contains("OR"));
@@ -261,7 +281,10 @@ mod tests {
             #[test]
             fn filter_preserves_input_plan() {
                 let df = create_test_dataframe();
-                let filtered = df.filter(Binary::eq(Column::new("active"), Literal::bool(true)));
+                let filtered = df.filter(Expr::Binary(Binary::eq(
+                    Expr::Column(Column::new("active")),
+                    Expr::Literal(Literal::bool(true)),
+                )));
 
                 let output = format!("{}", filtered);
                 assert!(output.contains("Scan: "));
@@ -276,8 +299,8 @@ mod tests {
             fn creates_aggregate_plan() {
                 let df = create_test_dataframe();
                 let aggregated = df.aggregate(
-                    vec![Box::new(Column::new("active"))],
-                    vec![AggregateExpr::sum(Column::new("salary"))],
+                    vec![Expr::Column(Column::new("active"))],
+                    vec![AggregateExpr::sum(Expr::Column(Column::new("salary")))],
                 );
 
                 let output = format!("{}", aggregated);
@@ -290,10 +313,10 @@ mod tests {
             fn aggregate_schema_has_group_and_agg_columns() {
                 let df = create_test_dataframe();
                 let aggregated = df.aggregate(
-                    vec![Box::new(Column::new("active"))],
+                    vec![Expr::Column(Column::new("active"))],
                     vec![
-                        AggregateExpr::sum(Column::new("salary")),
-                        AggregateExpr::count(Column::new("id")),
+                        AggregateExpr::sum(Expr::Column(Column::new("salary"))),
+                        AggregateExpr::count(Expr::Column(Column::new("id"))),
                     ],
                 );
 
@@ -311,8 +334,8 @@ mod tests {
                 let aggregated = df.aggregate(
                     vec![],
                     vec![
-                        AggregateExpr::count(Column::new("id")),
-                        AggregateExpr::avg(Column::new("salary")),
+                        AggregateExpr::count(Expr::Column(Column::new("id"))),
+                        AggregateExpr::avg(Expr::Column(Column::new("salary"))),
                     ],
                 );
 
@@ -328,10 +351,10 @@ mod tests {
                 let df = create_test_dataframe();
                 let aggregated = df.aggregate(
                     vec![
-                        Box::new(Column::new("active")),
-                        Box::new(Column::new("name")),
+                        Expr::Column(Column::new("active")),
+                        Expr::Column(Column::new("name")),
                     ],
-                    vec![AggregateExpr::max(Column::new("age"))],
+                    vec![AggregateExpr::max(Expr::Column(Column::new("age")))],
                 );
 
                 let output = format!("{}", aggregated);
@@ -342,8 +365,8 @@ mod tests {
             fn aggregate_preserves_input_plan() {
                 let df = create_test_dataframe();
                 let aggregated = df.aggregate(
-                    vec![Box::new(Column::new("active"))],
-                    vec![AggregateExpr::sum(Column::new("salary"))],
+                    vec![Expr::Column(Column::new("active"))],
+                    vec![AggregateExpr::sum(Expr::Column(Column::new("salary")))],
                 );
 
                 let output = format!("{}", aggregated);
@@ -370,8 +393,8 @@ mod tests {
             fn schema_reflects_transformations() {
                 let df = create_test_dataframe();
                 let projected = df.project(vec![
-                    Box::new(Column::new("name")),
-                    Box::new(Column::new("age")),
+                    Expr::Column(Column::new("name")),
+                    Expr::Column(Column::new("age")),
                 ]);
 
                 let schema = projected.schema();
@@ -389,7 +412,6 @@ mod tests {
                 let df = create_test_dataframe();
                 let plan = df.logical_plan();
 
-                // Verify it's a valid plan by checking schema
                 let schema = plan.schema();
                 assert_eq!(schema.fields().len(), 5);
             }
@@ -400,7 +422,6 @@ mod tests {
                 let plan1 = df.logical_plan();
                 let plan2 = df.logical_plan();
 
-                // Both should have the same schema
                 assert_eq!(plan1.schema(), plan2.schema());
             }
         }
@@ -422,10 +443,13 @@ mod tests {
             fn displays_chained_operations() {
                 let df = create_test_dataframe();
                 let result = df
-                    .filter(Binary::gt(Column::new("age"), Literal::int(25)))
+                    .filter(Expr::Binary(Binary::gt(
+                        Expr::Column(Column::new("age")),
+                        Expr::Literal(Literal::int(25)),
+                    )))
                     .project(vec![
-                        Box::new(Column::new("name")),
-                        Box::new(Column::new("salary")),
+                        Expr::Column(Column::new("name")),
+                        Expr::Column(Column::new("salary")),
                     ]);
 
                 let output = format!("{}", result);
@@ -442,12 +466,14 @@ mod tests {
             fn filter_then_project() {
                 let df = create_test_dataframe();
                 let result = df
-                    .filter(Binary::eq(Column::new("active"), Literal::bool(true)))
-                    .project(vec![Box::new(Column::new("name"))]);
+                    .filter(Expr::Binary(Binary::eq(
+                        Expr::Column(Column::new("active")),
+                        Expr::Literal(Literal::bool(true)),
+                    )))
+                    .project(vec![Expr::Column(Column::new("name"))]);
 
                 let output = format!("{}", result);
 
-                // Projection should be on top
                 let lines: Vec<&str> = output.lines().collect();
                 assert!(lines[0].contains("Projection:"));
                 assert!(lines[1].contains("Filter:"));
@@ -459,10 +485,13 @@ mod tests {
                 let df = create_test_dataframe();
                 let result = df
                     .project(vec![
-                        Box::new(Column::new("name")),
-                        Box::new(Column::new("age")),
+                        Expr::Column(Column::new("name")),
+                        Expr::Column(Column::new("age")),
                     ])
-                    .filter(Binary::gt(Column::new("age"), Literal::int(25)));
+                    .filter(Expr::Binary(Binary::gt(
+                        Expr::Column(Column::new("age")),
+                        Expr::Literal(Literal::int(25)),
+                    )));
 
                 let output = format!("{}", result);
 
@@ -476,10 +505,13 @@ mod tests {
             fn filter_then_aggregate() {
                 let df = create_test_dataframe();
                 let result = df
-                    .filter(Binary::gt(Column::new("age"), Literal::int(25)))
+                    .filter(Expr::Binary(Binary::gt(
+                        Expr::Column(Column::new("age")),
+                        Expr::Literal(Literal::int(25)),
+                    )))
                     .aggregate(
-                        vec![Box::new(Column::new("active"))],
-                        vec![AggregateExpr::sum(Column::new("salary"))],
+                        vec![Expr::Column(Column::new("active"))],
+                        vec![AggregateExpr::sum(Expr::Column(Column::new("salary")))],
                     );
 
                 let output = format!("{}", result);
@@ -494,13 +526,21 @@ mod tests {
             fn multiple_filters() {
                 let df = create_test_dataframe();
                 let result = df
-                    .filter(Binary::gt(Column::new("age"), Literal::int(20)))
-                    .filter(Binary::lt(Column::new("age"), Literal::int(40)))
-                    .filter(Binary::eq(Column::new("active"), Literal::bool(true)));
+                    .filter(Expr::Binary(Binary::gt(
+                        Expr::Column(Column::new("age")),
+                        Expr::Literal(Literal::int(20)),
+                    )))
+                    .filter(Expr::Binary(Binary::lt(
+                        Expr::Column(Column::new("age")),
+                        Expr::Literal(Literal::int(40)),
+                    )))
+                    .filter(Expr::Binary(Binary::eq(
+                        Expr::Column(Column::new("active")),
+                        Expr::Literal(Literal::bool(true)),
+                    )));
 
                 let output = format!("{}", result);
 
-                // Count filter occurrences
                 let filter_count = output.matches("Filter:").count();
                 assert_eq!(filter_count, 3);
             }
@@ -514,13 +554,19 @@ mod tests {
 
                 let df = create_test_dataframe();
                 let result = df
-                    .filter(Binary::and(
-                        Binary::gt(Column::new("age"), Literal::int(25)),
-                        Binary::eq(Column::new("active"), Literal::bool(true)),
-                    ))
+                    .filter(Expr::Binary(Binary::and(
+                        Expr::Binary(Binary::gt(
+                            Expr::Column(Column::new("age")),
+                            Expr::Literal(Literal::int(25)),
+                        )),
+                        Expr::Binary(Binary::eq(
+                            Expr::Column(Column::new("active")),
+                            Expr::Literal(Literal::bool(true)),
+                        )),
+                    )))
                     .aggregate(
-                        vec![Box::new(Column::new("name"))],
-                        vec![AggregateExpr::sum(Column::new("salary"))],
+                        vec![Expr::Column(Column::new("name"))],
+                        vec![AggregateExpr::sum(Expr::Column(Column::new("salary")))],
                     );
 
                 let schema = result.schema();
@@ -544,7 +590,6 @@ mod tests {
 
         #[test]
         fn end_to_end_csv_query() {
-            // Create test CSV
             let dir = tempdir().unwrap();
             let file_path = dir.path().join("employees.csv");
             let mut file = File::create(&file_path).unwrap();
@@ -561,21 +606,19 @@ mod tests {
             // WHERE department = 'Engineering'
             let df = ctx
                 .csv(&file_path.to_string_lossy(), b';', true)
-                .filter(Binary::eq(
-                    Column::new("department"),
-                    Literal::string("Engineering"),
-                ))
+                .filter(Expr::Binary(Binary::eq(
+                    Expr::Column(Column::new("department")),
+                    Expr::Literal(Literal::string("Engineering")),
+                )))
                 .project(vec![
-                    Box::new(Column::new("name")),
-                    Box::new(Column::new("salary")),
+                    Expr::Column(Column::new("name")),
+                    Expr::Column(Column::new("salary")),
                 ]);
 
-            // Verify plan structure
             let output = format!("{}", df);
             assert!(output.contains("Projection: #name, #salary"));
             assert!(output.contains("Filter: #department = 'Engineering'"));
 
-            // Verify schema
             let schema = df.schema();
             let field_names: Vec<&str> =
                 schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -599,10 +642,10 @@ mod tests {
             // FROM sales
             // GROUP BY region
             let df = ctx.csv(&file_path.to_string_lossy(), b';', true).aggregate(
-                vec![Box::new(Column::new("region"))],
+                vec![Expr::Column(Column::new("region"))],
                 vec![
-                    AggregateExpr::sum(Column::new("amount")),
-                    AggregateExpr::count(Column::new("product")),
+                    AggregateExpr::sum(Expr::Column(Column::new("amount"))),
+                    AggregateExpr::count(Expr::Column(Column::new("product"))),
                 ],
             );
 
@@ -635,26 +678,24 @@ mod tests {
             // GROUP BY customer
             let df = ctx
                 .csv(&file_path.to_string_lossy(), b';', true)
-                .filter(Binary::eq(
-                    Column::new("status"),
-                    Literal::string("completed"),
-                ))
+                .filter(Expr::Binary(Binary::eq(
+                    Expr::Column(Column::new("status")),
+                    Expr::Literal(Literal::string("completed")),
+                )))
                 .aggregate(
-                    vec![Box::new(Column::new("customer"))],
+                    vec![Expr::Column(Column::new("customer"))],
                     vec![
-                        AggregateExpr::sum(Column::new("total")),
-                        AggregateExpr::count(Column::new("order_id")),
+                        AggregateExpr::sum(Expr::Column(Column::new("total"))),
+                        AggregateExpr::count(Expr::Column(Column::new("order_id"))),
                     ],
                 );
 
             let output = format!("{}", df);
 
-            // Verify plan hierarchy
             assert!(output.contains("Aggregate:"));
             assert!(output.contains("Filter:"));
             assert!(output.contains("Scan:"));
 
-            // Verify schema
             let schema = df.schema();
             assert_eq!(schema.fields().len(), 3);
         }
@@ -671,20 +712,19 @@ mod tests {
             let ctx = ExecutionContext::new();
             let df1 = ctx.csv(&file_path.to_string_lossy(), b';', true);
 
-            // Create two different transformations from the same base
-            let df2 = df1.filter(Binary::eq(Column::new("a"), Literal::int(1)));
-            let df3 = df1.project(vec![Box::new(Column::new("b"))]);
+            let df2 = df1.filter(Expr::Binary(Binary::eq(
+                Expr::Column(Column::new("a")),
+                Expr::Literal(Literal::int(1)),
+            )));
+            let df3 = df1.project(vec![Expr::Column(Column::new("b"))]);
 
-            // Original should still be a simple scan
             let output1 = format!("{}", df1);
             assert!(!output1.contains("Filter:"));
             assert!(!output1.contains("Projection:"));
 
-            // df2 should have filter
             let output2 = format!("{}", df2);
             assert!(output2.contains("Filter:"));
 
-            // df3 should have projection
             let output3 = format!("{}", df3);
             assert!(output3.contains("Projection:"));
         }

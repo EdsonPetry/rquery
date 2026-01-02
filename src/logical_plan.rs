@@ -9,7 +9,7 @@ use crate::data_sources::DataSource;
 
 pub trait LogicalPlan: Display {
     fn schema(&self) -> Arc<Schema>;
-    fn children(&self) -> Vec<Arc<dyn LogicalPlan>>;
+    fn children(&self) -> Vec<Arc<Plan>>;
     fn format_node(&self) -> String;
 }
 
@@ -38,8 +38,38 @@ pub enum Expr {
     Literal(Literal),
     Column(Column),
     Binary(Binary),
-    Aggregate(Aggregate),
+    Aggregate(AggregateExpr),
     Alias(Alias),
+}
+
+impl Expr {
+    pub fn to_field(&self, input: &dyn LogicalPlan) -> Arc<Field> {
+        match self {
+            Expr::Literal(lit) => lit.to_field(input),
+            Expr::Column(col) => col.to_field(input),
+            Expr::Binary(bin) => bin.to_field(input),
+            Expr::Aggregate(agg) => agg.to_field(input),
+            Expr::Alias(alias) => alias.to_field(input),
+        }
+    }
+}
+
+impl fmt::Display for Expr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Expr::Literal(lit) => write!(f, "{}", lit),
+            Expr::Column(col) => write!(f, "{}", col),
+            Expr::Binary(bin) => write!(f, "{}", bin),
+            Expr::Aggregate(agg) => write!(f, "{}", agg),
+            Expr::Alias(alias) => write!(f, "{}", alias),
+        }
+    }
+}
+
+impl LogicalExpr for Expr {
+    fn to_field(&self, input: &dyn LogicalPlan) -> Arc<Field> {
+        Expr::to_field(self, input)
+    }
 }
 
 pub trait LogicalExpr: fmt::Display {
@@ -192,17 +222,13 @@ impl BinaryOp {
 }
 
 pub struct Binary {
-    pub left: Box<dyn LogicalExpr>,
+    pub left: Box<Expr>,
     pub op: BinaryOp,
-    pub right: Box<dyn LogicalExpr>,
+    pub right: Box<Expr>,
 }
 
 impl Binary {
-    pub fn new(
-        left: impl LogicalExpr + 'static,
-        op: BinaryOp,
-        right: impl LogicalExpr + 'static,
-    ) -> Self {
+    pub fn new(left: Expr, op: BinaryOp, right: Expr) -> Self {
         Binary {
             left: Box::new(left),
             op,
@@ -210,35 +236,35 @@ impl Binary {
         }
     }
 
-    pub fn eq(left: impl LogicalExpr + 'static, right: impl LogicalExpr + 'static) -> Self {
+    pub fn eq(left: Expr, right: Expr) -> Self {
         Self::new(left, BinaryOp::Eq, right)
     }
 
-    pub fn neq(left: impl LogicalExpr + 'static, right: impl LogicalExpr + 'static) -> Self {
+    pub fn neq(left: Expr, right: Expr) -> Self {
         Self::new(left, BinaryOp::Neq, right)
     }
 
-    pub fn gt(left: impl LogicalExpr + 'static, right: impl LogicalExpr + 'static) -> Self {
+    pub fn gt(left: Expr, right: Expr) -> Self {
         Self::new(left, BinaryOp::Gt, right)
     }
 
-    pub fn lt(left: impl LogicalExpr + 'static, right: impl LogicalExpr + 'static) -> Self {
+    pub fn lt(left: Expr, right: Expr) -> Self {
         Self::new(left, BinaryOp::Lt, right)
     }
 
-    pub fn and(left: impl LogicalExpr + 'static, right: impl LogicalExpr + 'static) -> Self {
+    pub fn and(left: Expr, right: Expr) -> Self {
         Self::new(left, BinaryOp::And, right)
     }
 
-    pub fn or(left: impl LogicalExpr + 'static, right: impl LogicalExpr + 'static) -> Self {
+    pub fn or(left: Expr, right: Expr) -> Self {
         Self::new(left, BinaryOp::Or, right)
     }
 
-    pub fn add(left: impl LogicalExpr + 'static, right: impl LogicalExpr + 'static) -> Self {
+    pub fn add(left: Expr, right: Expr) -> Self {
         Self::new(left, BinaryOp::Add, right)
     }
 
-    pub fn mul(left: impl LogicalExpr + 'static, right: impl LogicalExpr + 'static) -> Self {
+    pub fn mul(left: Expr, right: Expr) -> Self {
         Self::new(left, BinaryOp::Mul, right)
     }
 }
@@ -283,41 +309,39 @@ impl AggregateOp {
 }
 
 pub struct AggregateExpr {
-    op: AggregateOp,
-    expr: Box<dyn LogicalExpr>,
+    pub op: AggregateOp,
+    pub expr: Box<Expr>,
 }
 
 impl AggregateExpr {
-    pub fn new(op: AggregateOp, expr: impl LogicalExpr + 'static) -> Self {
+    pub fn new(op: AggregateOp, expr: Expr) -> Self {
         AggregateExpr {
             op,
             expr: Box::new(expr),
         }
     }
 
-    pub fn sum(expr: impl LogicalExpr + 'static) -> Self {
+    pub fn sum(expr: Expr) -> Self {
         Self::new(AggregateOp::Sum, expr)
     }
 
-    pub fn min(expr: impl LogicalExpr + 'static) -> Self {
+    pub fn min(expr: Expr) -> Self {
         Self::new(AggregateOp::Min, expr)
     }
 
-    pub fn max(expr: impl LogicalExpr + 'static) -> Self {
+    pub fn max(expr: Expr) -> Self {
         Self::new(AggregateOp::Max, expr)
     }
 
-    pub fn avg(expr: impl LogicalExpr + 'static) -> Self {
+    pub fn avg(expr: Expr) -> Self {
         Self::new(AggregateOp::Avg, expr)
     }
 
-    pub fn count(expr: impl LogicalExpr + 'static) -> Self {
+    pub fn count(expr: Expr) -> Self {
         Self::new(AggregateOp::Count, expr)
     }
-}
 
-impl LogicalExpr for AggregateExpr {
-    fn to_field(&self, input: &dyn LogicalPlan) -> Arc<Field> {
+    pub fn to_field(&self, input: &dyn LogicalPlan) -> Arc<Field> {
         let inner_field = self.expr.to_field(input);
 
         let data_type = match self.op {
@@ -334,6 +358,12 @@ impl LogicalExpr for AggregateExpr {
     }
 }
 
+impl LogicalExpr for AggregateExpr {
+    fn to_field(&self, input: &dyn LogicalPlan) -> Arc<Field> {
+        AggregateExpr::to_field(self, input)
+    }
+}
+
 impl Display for AggregateExpr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "{}({})", self.op.symbol(), self.expr)
@@ -341,21 +371,19 @@ impl Display for AggregateExpr {
 }
 
 pub struct Alias {
-    pub expr: Box<dyn LogicalExpr>,
+    pub expr: Box<Expr>,
     pub alias: String,
 }
 
 impl Alias {
-    pub fn new(expr: impl LogicalExpr + 'static, alias: &str) -> Self {
+    pub fn new(expr: Expr, alias: &str) -> Self {
         Alias {
             expr: Box::new(expr),
             alias: alias.to_string(),
         }
     }
-}
 
-impl LogicalExpr for Alias {
-    fn to_field(&self, input: &dyn LogicalPlan) -> Arc<Field> {
+    pub fn to_field(&self, input: &dyn LogicalPlan) -> Arc<Field> {
         let field = self.expr.to_field(input);
         Arc::new(Field::new(
             &self.alias,
@@ -365,9 +393,76 @@ impl LogicalExpr for Alias {
     }
 }
 
+impl LogicalExpr for Alias {
+    fn to_field(&self, input: &dyn LogicalPlan) -> Arc<Field> {
+        Alias::to_field(self, input)
+    }
+}
+
 impl fmt::Display for Alias {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{} AS {}", self.expr, self.alias)
+    }
+}
+
+pub enum Plan {
+    Scan(Scan),
+    Selection(Selection),
+    Projection(Projection),
+    Aggregate(Aggregate),
+}
+
+impl Plan {
+    pub fn schema(&self) -> Arc<Schema> {
+        match self {
+            Plan::Scan(scan) => scan.schema(),
+            Plan::Selection(sel) => sel.schema(),
+            Plan::Projection(proj) => proj.schema(),
+            Plan::Aggregate(agg) => agg.schema(),
+        }
+    }
+
+    pub fn children(&self) -> Vec<Arc<Plan>> {
+        match self {
+            Plan::Scan(scan) => scan.children(),
+            Plan::Selection(sel) => sel.children(),
+            Plan::Projection(proj) => proj.children(),
+            Plan::Aggregate(agg) => agg.children(),
+        }
+    }
+
+    pub fn format_node(&self) -> String {
+        match self {
+            Plan::Scan(scan) => scan.format_node(),
+            Plan::Selection(sel) => sel.format_node(),
+            Plan::Projection(proj) => proj.format_node(),
+            Plan::Aggregate(agg) => agg.format_node(),
+        }
+    }
+}
+
+impl fmt::Display for Plan {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Plan::Scan(scan) => write!(f, "{}", scan),
+            Plan::Selection(sel) => write!(f, "{}", sel),
+            Plan::Projection(proj) => write!(f, "{}", proj),
+            Plan::Aggregate(agg) => write!(f, "{}", agg),
+        }
+    }
+}
+
+impl LogicalPlan for Plan {
+    fn schema(&self) -> Arc<Schema> {
+        Plan::schema(self)
+    }
+
+    fn children(&self) -> Vec<Arc<Plan>> {
+        Plan::children(self)
+    }
+
+    fn format_node(&self) -> String {
+        Plan::format_node(self)
     }
 }
 
@@ -401,7 +496,7 @@ impl LogicalPlan for Scan {
         self.schema.clone()
     }
 
-    fn children(&self) -> Vec<Arc<dyn LogicalPlan>> {
+    fn children(&self) -> Vec<Arc<Plan>> {
         vec![]
     }
 
@@ -422,16 +517,13 @@ impl Display for Scan {
 // ============== SELECTION ===============
 
 pub struct Selection {
-    pub input: Arc<dyn LogicalPlan>,
-    pub expr: Box<dyn LogicalExpr>,
+    pub input: Arc<Plan>,
+    pub expr: Expr,
 }
 
 impl Selection {
-    pub fn new(input: Arc<dyn LogicalPlan>, expr: impl LogicalExpr + 'static) -> Self {
-        Selection {
-            input,
-            expr: Box::new(expr),
-        }
+    pub fn new(input: Arc<Plan>, expr: Expr) -> Self {
+        Selection { input, expr }
     }
 }
 
@@ -440,7 +532,7 @@ impl LogicalPlan for Selection {
         self.input.schema()
     }
 
-    fn children(&self) -> Vec<Arc<dyn LogicalPlan>> {
+    fn children(&self) -> Vec<Arc<Plan>> {
         vec![self.input.clone()]
     }
 
@@ -458,12 +550,12 @@ impl Display for Selection {
 // ================= PROJECTION ===============
 
 pub struct Projection {
-    pub input: Arc<dyn LogicalPlan>,
-    pub expr: Vec<Box<dyn LogicalExpr>>,
+    pub input: Arc<Plan>,
+    pub expr: Vec<Expr>,
 }
 
 impl Projection {
-    pub fn new(input: Arc<dyn LogicalPlan>, expr: Vec<Box<dyn LogicalExpr>>) -> Self {
+    pub fn new(input: Arc<Plan>, expr: Vec<Expr>) -> Self {
         Projection { input, expr }
     }
 }
@@ -478,7 +570,7 @@ impl LogicalPlan for Projection {
         Arc::new(Schema::new(fields))
     }
 
-    fn children(&self) -> Vec<Arc<dyn LogicalPlan>> {
+    fn children(&self) -> Vec<Arc<Plan>> {
         vec![self.input.clone()]
     }
 
@@ -497,15 +589,15 @@ impl Display for Projection {
 // ================= AGGREGATE ===============
 
 pub struct Aggregate {
-    pub input: Arc<dyn LogicalPlan>,
-    pub group_expr: Vec<Box<dyn LogicalExpr>>,
+    pub input: Arc<Plan>,
+    pub group_expr: Vec<Expr>,
     pub aggregate_expr: Vec<AggregateExpr>,
 }
 
 impl Aggregate {
     pub fn new(
-        input: Arc<dyn LogicalPlan>,
-        group_expr: Vec<Box<dyn LogicalExpr>>,
+        input: Arc<Plan>,
+        group_expr: Vec<Expr>,
         aggregate_expr: Vec<AggregateExpr>,
     ) -> Self {
         Aggregate {
@@ -534,7 +626,7 @@ impl LogicalPlan for Aggregate {
         Arc::new(Schema::new(fields))
     }
 
-    fn children(&self) -> Vec<Arc<dyn LogicalPlan>> {
+    fn children(&self) -> Vec<Arc<Plan>> {
         vec![self.input.clone()]
     }
 
@@ -596,8 +688,12 @@ mod tests {
         Box::new(InMemoryDataSource::try_new(Some(vec![batch])).unwrap())
     }
 
-    fn create_test_scan() -> Arc<dyn LogicalPlan> {
-        Arc::new(Scan::new("test_table", create_test_data_source(), None))
+    fn create_test_scan() -> Arc<Plan> {
+        Arc::new(Plan::Scan(Scan::new(
+            "test_table",
+            create_test_data_source(),
+            None,
+        )))
     }
 
     mod column {
@@ -832,49 +928,73 @@ mod tests {
 
             #[test]
             fn eq_creates_equality_expression() {
-                let expr = Binary::eq(Column::new("a"), Literal::int(1));
+                let expr = Binary::eq(
+                    Expr::Column(Column::new("a")),
+                    Expr::Literal(Literal::int(1)),
+                );
                 assert!(matches!(expr.op, BinaryOp::Eq));
             }
 
             #[test]
             fn neq_creates_not_equal_expression() {
-                let expr = Binary::neq(Column::new("a"), Literal::int(1));
+                let expr = Binary::neq(
+                    Expr::Column(Column::new("a")),
+                    Expr::Literal(Literal::int(1)),
+                );
                 assert!(matches!(expr.op, BinaryOp::Neq));
             }
 
             #[test]
             fn gt_creates_greater_than_expression() {
-                let expr = Binary::gt(Column::new("a"), Literal::int(1));
+                let expr = Binary::gt(
+                    Expr::Column(Column::new("a")),
+                    Expr::Literal(Literal::int(1)),
+                );
                 assert!(matches!(expr.op, BinaryOp::Gt));
             }
 
             #[test]
             fn lt_creates_less_than_expression() {
-                let expr = Binary::lt(Column::new("a"), Literal::int(1));
+                let expr = Binary::lt(
+                    Expr::Column(Column::new("a")),
+                    Expr::Literal(Literal::int(1)),
+                );
                 assert!(matches!(expr.op, BinaryOp::Lt));
             }
 
             #[test]
             fn and_creates_and_expression() {
-                let expr = Binary::and(Literal::bool(true), Literal::bool(false));
+                let expr = Binary::and(
+                    Expr::Literal(Literal::bool(true)),
+                    Expr::Literal(Literal::bool(false)),
+                );
                 assert!(matches!(expr.op, BinaryOp::And));
             }
 
             #[test]
             fn or_creates_or_expression() {
-                let expr = Binary::or(Literal::bool(true), Literal::bool(false));
+                let expr = Binary::or(
+                    Expr::Literal(Literal::bool(true)),
+                    Expr::Literal(Literal::bool(false)),
+                );
                 assert!(matches!(expr.op, BinaryOp::Or));
             }
 
             #[test]
             fn add_creates_addition_expression() {
-                let expr = Binary::add(Column::new("a"), Literal::int(1));
+                let expr = Binary::add(
+                    Expr::Column(Column::new("a")),
+                    Expr::Literal(Literal::int(1)),
+                );
                 assert!(matches!(expr.op, BinaryOp::Add));
             }
 
             #[test]
             fn mul_creates_multiplication_expression() {
-                let expr = Binary::mul(Column::new("a"), Literal::int(2));
+                let expr = Binary::mul(
+                    Expr::Column(Column::new("a")),
+                    Expr::Literal(Literal::int(2)),
+                );
                 assert!(matches!(expr.op, BinaryOp::Mul));
             }
         }
@@ -884,20 +1004,29 @@ mod tests {
 
             #[test]
             fn formats_comparison_correctly() {
-                let expr = Binary::eq(Column::new("age"), Literal::int(30));
+                let expr = Binary::eq(
+                    Expr::Column(Column::new("age")),
+                    Expr::Literal(Literal::int(30)),
+                );
                 assert_eq!(format!("{}", expr), "#age = 30");
             }
 
             #[test]
             fn formats_math_correctly() {
-                let expr = Binary::add(Column::new("salary"), Literal::float(1000.0));
+                let expr = Binary::add(
+                    Expr::Column(Column::new("salary")),
+                    Expr::Literal(Literal::float(1000.0)),
+                );
                 assert_eq!(format!("{}", expr), "#salary + 1000");
             }
 
             #[test]
             fn formats_nested_expressions() {
-                let inner = Binary::add(Column::new("a"), Literal::int(1));
-                let outer = Binary::mul(inner, Literal::int(2));
+                let inner = Binary::add(
+                    Expr::Column(Column::new("a")),
+                    Expr::Literal(Literal::int(1)),
+                );
+                let outer = Binary::mul(Expr::Binary(inner), Expr::Literal(Literal::int(2)));
                 assert_eq!(format!("{}", outer), "#a + 1 * 2");
             }
         }
@@ -908,7 +1037,10 @@ mod tests {
             #[test]
             fn comparison_returns_boolean_field() {
                 let scan = create_test_scan();
-                let expr = Binary::eq(Column::new("age"), Literal::int(30));
+                let expr = Binary::eq(
+                    Expr::Column(Column::new("age")),
+                    Expr::Literal(Literal::int(30)),
+                );
                 let field = expr.to_field(scan.as_ref());
 
                 assert_eq!(field.data_type(), &DataType::Boolean);
@@ -918,8 +1050,14 @@ mod tests {
             fn logical_returns_boolean_field() {
                 let scan = create_test_scan();
                 let expr = Binary::and(
-                    Binary::eq(Column::new("age"), Literal::int(30)),
-                    Binary::eq(Column::new("active"), Literal::bool(true)),
+                    Expr::Binary(Binary::eq(
+                        Expr::Column(Column::new("age")),
+                        Expr::Literal(Literal::int(30)),
+                    )),
+                    Expr::Binary(Binary::eq(
+                        Expr::Column(Column::new("active")),
+                        Expr::Literal(Literal::bool(true)),
+                    )),
                 );
                 let field = expr.to_field(scan.as_ref());
 
@@ -930,13 +1068,19 @@ mod tests {
             fn math_preserves_left_operand_type() {
                 let scan = create_test_scan();
 
-                let int_expr = Binary::add(Column::new("age"), Literal::int(1));
+                let int_expr = Expr::Binary(Binary::add(
+                    Expr::Column(Column::new("age")),
+                    Expr::Literal(Literal::int(1)),
+                ));
                 assert_eq!(
                     int_expr.to_field(scan.as_ref()).data_type(),
                     &DataType::Int64
                 );
 
-                let float_expr = Binary::mul(Column::new("salary"), Literal::float(1.1));
+                let float_expr = Expr::Binary(Binary::mul(
+                    Expr::Column(Column::new("salary")),
+                    Expr::Literal(Literal::float(1.1)),
+                ));
                 assert_eq!(
                     float_expr.to_field(scan.as_ref()).data_type(),
                     &DataType::Float64
@@ -966,31 +1110,31 @@ mod tests {
 
             #[test]
             fn sum_creates_sum_expression() {
-                let expr = AggregateExpr::sum(Column::new("salary"));
+                let expr = AggregateExpr::sum(Expr::Column(Column::new("salary")));
                 assert_eq!(format!("{}", expr), "SUM(#salary)");
             }
 
             #[test]
             fn min_creates_min_expression() {
-                let expr = AggregateExpr::min(Column::new("age"));
+                let expr = AggregateExpr::min(Expr::Column(Column::new("age")));
                 assert_eq!(format!("{}", expr), "MIN(#age)");
             }
 
             #[test]
             fn max_creates_max_expression() {
-                let expr = AggregateExpr::max(Column::new("age"));
+                let expr = AggregateExpr::max(Expr::Column(Column::new("age")));
                 assert_eq!(format!("{}", expr), "MAX(#age)");
             }
 
             #[test]
             fn avg_creates_avg_expression() {
-                let expr = AggregateExpr::avg(Column::new("salary"));
+                let expr = AggregateExpr::avg(Expr::Column(Column::new("salary")));
                 assert_eq!(format!("{}", expr), "AVG(#salary)");
             }
 
             #[test]
             fn count_creates_count_expression() {
-                let expr = AggregateExpr::count(Column::new("id"));
+                let expr = AggregateExpr::count(Expr::Column(Column::new("id")));
                 assert_eq!(format!("{}", expr), "COUNT(#id)");
             }
         }
@@ -1001,7 +1145,7 @@ mod tests {
             #[test]
             fn count_returns_int64() {
                 let scan = create_test_scan();
-                let expr = AggregateExpr::count(Column::new("name"));
+                let expr = AggregateExpr::count(Expr::Column(Column::new("name")));
                 let field = expr.to_field(scan.as_ref());
 
                 assert_eq!(field.data_type(), &DataType::Int64);
@@ -1010,7 +1154,7 @@ mod tests {
             #[test]
             fn avg_returns_float64() {
                 let scan = create_test_scan();
-                let expr = AggregateExpr::avg(Column::new("age"));
+                let expr = AggregateExpr::avg(Expr::Column(Column::new("age")));
                 let field = expr.to_field(scan.as_ref());
 
                 assert_eq!(field.data_type(), &DataType::Float64);
@@ -1020,13 +1164,13 @@ mod tests {
             fn sum_preserves_input_type() {
                 let scan = create_test_scan();
 
-                let int_sum = AggregateExpr::sum(Column::new("age"));
+                let int_sum = AggregateExpr::sum(Expr::Column(Column::new("age")));
                 assert_eq!(
                     int_sum.to_field(scan.as_ref()).data_type(),
                     &DataType::Int64
                 );
 
-                let float_sum = AggregateExpr::sum(Column::new("salary"));
+                let float_sum = AggregateExpr::sum(Expr::Column(Column::new("salary")));
                 assert_eq!(
                     float_sum.to_field(scan.as_ref()).data_type(),
                     &DataType::Float64
@@ -1037,13 +1181,13 @@ mod tests {
             fn min_max_preserve_input_type() {
                 let scan = create_test_scan();
 
-                let min_expr = AggregateExpr::min(Column::new("age"));
+                let min_expr = AggregateExpr::min(Expr::Column(Column::new("age")));
                 assert_eq!(
                     min_expr.to_field(scan.as_ref()).data_type(),
                     &DataType::Int64
                 );
 
-                let max_expr = AggregateExpr::max(Column::new("salary"));
+                let max_expr = AggregateExpr::max(Expr::Column(Column::new("salary")));
                 assert_eq!(
                     max_expr.to_field(scan.as_ref()).data_type(),
                     &DataType::Float64
@@ -1053,7 +1197,7 @@ mod tests {
             #[test]
             fn field_name_includes_function_and_column() {
                 let scan = create_test_scan();
-                let expr = AggregateExpr::sum(Column::new("salary"));
+                let expr = AggregateExpr::sum(Expr::Column(Column::new("salary")));
                 let field = expr.to_field(scan.as_ref());
 
                 assert_eq!(field.name(), "SUM(#salary)");
@@ -1062,7 +1206,7 @@ mod tests {
             #[test]
             fn aggregate_fields_are_nullable() {
                 let scan = create_test_scan();
-                let expr = AggregateExpr::sum(Column::new("age"));
+                let expr = AggregateExpr::sum(Expr::Column(Column::new("age")));
                 let field = expr.to_field(scan.as_ref());
 
                 assert!(field.is_nullable());
@@ -1075,20 +1219,20 @@ mod tests {
 
         #[test]
         fn creates_alias_with_expression_and_name() {
-            let alias = Alias::new(Column::new("first_name"), "fname");
+            let alias = Alias::new(Expr::Column(Column::new("first_name")), "fname");
             assert_eq!(alias.alias, "fname");
         }
 
         #[test]
         fn display_formats_with_as() {
-            let alias = Alias::new(Column::new("first_name"), "fname");
+            let alias = Alias::new(Expr::Column(Column::new("first_name")), "fname");
             assert_eq!(format!("{}", alias), "#first_name AS fname");
         }
 
         #[test]
         fn to_field_uses_alias_name() {
             let scan = create_test_scan();
-            let alias = Alias::new(Column::new("name"), "full_name");
+            let alias = Alias::new(Expr::Column(Column::new("name")), "full_name");
             let field = alias.to_field(scan.as_ref());
 
             assert_eq!(field.name(), "full_name");
@@ -1097,7 +1241,7 @@ mod tests {
         #[test]
         fn to_field_preserves_data_type() {
             let scan = create_test_scan();
-            let alias = Alias::new(Column::new("salary"), "pay");
+            let alias = Alias::new(Expr::Column(Column::new("salary")), "pay");
             let field = alias.to_field(scan.as_ref());
 
             assert_eq!(field.data_type(), &DataType::Float64);
@@ -1107,17 +1251,21 @@ mod tests {
         fn to_field_preserves_nullability() {
             let scan = create_test_scan();
 
-            let nullable_alias = Alias::new(Column::new("age"), "years");
+            let nullable_alias = Expr::Alias(Alias::new(Expr::Column(Column::new("age")), "years"));
             assert!(nullable_alias.to_field(scan.as_ref()).is_nullable());
 
-            let non_nullable_alias = Alias::new(Column::new("id"), "identifier");
+            let non_nullable_alias =
+                Expr::Alias(Alias::new(Expr::Column(Column::new("id")), "identifier"));
             assert!(!non_nullable_alias.to_field(scan.as_ref()).is_nullable());
         }
 
         #[test]
         fn works_with_complex_expressions() {
             let scan = create_test_scan();
-            let expr = Binary::add(Column::new("salary"), Literal::float(1000.0));
+            let expr = Expr::Binary(Binary::add(
+                Expr::Column(Column::new("salary")),
+                Expr::Literal(Literal::float(1000.0)),
+            ));
             let alias = Alias::new(expr, "adjusted_salary");
 
             let field = alias.to_field(scan.as_ref());
@@ -1181,8 +1329,11 @@ mod tests {
         #[test]
         fn new_creates_selection_with_input_and_expr() {
             let scan = create_test_scan();
-            let expr = Binary::eq(Column::new("age"), Literal::int(30));
-            let selection = Selection::new(scan, expr);
+            let expr = Expr::Binary(Binary::eq(
+                Expr::Column(Column::new("age")),
+                Expr::Literal(Literal::int(30)),
+            ));
+            let selection = Plan::Selection(Selection::new(scan, expr));
 
             assert!(!selection.children().is_empty());
         }
@@ -1190,8 +1341,11 @@ mod tests {
         #[test]
         fn schema_passes_through_input_schema() {
             let scan = create_test_scan();
-            let expr = Binary::eq(Column::new("age"), Literal::int(30));
-            let selection = Selection::new(scan.clone(), expr);
+            let expr = Expr::Binary(Binary::eq(
+                Expr::Column(Column::new("age")),
+                Expr::Literal(Literal::int(30)),
+            ));
+            let selection = Plan::Selection(Selection::new(scan.clone(), expr));
 
             assert_eq!(selection.schema(), scan.schema());
         }
@@ -1199,7 +1353,10 @@ mod tests {
         #[test]
         fn children_returns_input() {
             let scan = create_test_scan();
-            let expr = Binary::eq(Column::new("age"), Literal::int(30));
+            let expr = Expr::Binary(Binary::eq(
+                Expr::Column(Column::new("age")),
+                Expr::Literal(Literal::int(30)),
+            ));
             let selection = Selection::new(scan, expr);
 
             assert_eq!(selection.children().len(), 1);
@@ -1208,7 +1365,10 @@ mod tests {
         #[test]
         fn format_node_shows_filter_expression() {
             let scan = create_test_scan();
-            let expr = Binary::eq(Column::new("age"), Literal::int(30));
+            let expr = Expr::Binary(Binary::eq(
+                Expr::Column(Column::new("age")),
+                Expr::Literal(Literal::int(30)),
+            ));
             let selection = Selection::new(scan, expr);
 
             assert_eq!(selection.format_node(), "Filter: #age = 30");
@@ -1217,7 +1377,10 @@ mod tests {
         #[test]
         fn display_shows_hierarchical_plan() {
             let scan = create_test_scan();
-            let expr = Binary::eq(Column::new("age"), Literal::int(30));
+            let expr = Expr::Binary(Binary::eq(
+                Expr::Column(Column::new("age")),
+                Expr::Literal(Literal::int(30)),
+            ));
             let selection = Selection::new(scan, expr);
 
             let output = format!("{}", selection);
@@ -1232,8 +1395,10 @@ mod tests {
         #[test]
         fn new_creates_projection() {
             let scan = create_test_scan();
-            let exprs: Vec<Box<dyn LogicalExpr>> =
-                vec![Box::new(Column::new("id")), Box::new(Column::new("name"))];
+            let exprs: Vec<Expr> = vec![
+                Expr::Column(Column::new("id")),
+                Expr::Column(Column::new("name")),
+            ];
             let projection = Projection::new(scan, exprs);
 
             assert_eq!(projection.expr.len(), 2);
@@ -1242,8 +1407,10 @@ mod tests {
         #[test]
         fn schema_contains_projected_columns() {
             let scan = create_test_scan();
-            let exprs: Vec<Box<dyn LogicalExpr>> =
-                vec![Box::new(Column::new("id")), Box::new(Column::new("name"))];
+            let exprs: Vec<Expr> = vec![
+                Expr::Column(Column::new("id")),
+                Expr::Column(Column::new("name")),
+            ];
             let projection = Projection::new(scan, exprs);
 
             let schema = projection.schema();
@@ -1257,8 +1424,10 @@ mod tests {
         #[test]
         fn schema_handles_aliases() {
             let scan = create_test_scan();
-            let exprs: Vec<Box<dyn LogicalExpr>> =
-                vec![Box::new(Alias::new(Column::new("name"), "full_name"))];
+            let exprs: Vec<Expr> = vec![Expr::Alias(Alias::new(
+                Expr::Column(Column::new("name")),
+                "full_name",
+            ))];
             let projection = Projection::new(scan, exprs);
 
             let schema = projection.schema();
@@ -1268,9 +1437,9 @@ mod tests {
         #[test]
         fn schema_handles_expressions() {
             let scan = create_test_scan();
-            let exprs: Vec<Box<dyn LogicalExpr>> = vec![Box::new(Binary::add(
-                Column::new("salary"),
-                Literal::float(1000.0),
+            let exprs: Vec<Expr> = vec![Expr::Binary(Binary::add(
+                Expr::Column(Column::new("salary")),
+                Expr::Literal(Literal::float(1000.0)),
             ))];
             let projection = Projection::new(scan, exprs);
 
@@ -1281,7 +1450,7 @@ mod tests {
         #[test]
         fn children_returns_input() {
             let scan = create_test_scan();
-            let exprs: Vec<Box<dyn LogicalExpr>> = vec![Box::new(Column::new("id"))];
+            let exprs: Vec<Expr> = vec![Expr::Column(Column::new("id"))];
             let projection = Projection::new(scan, exprs);
 
             assert_eq!(projection.children().len(), 1);
@@ -1290,8 +1459,10 @@ mod tests {
         #[test]
         fn format_node_shows_projected_columns() {
             let scan = create_test_scan();
-            let exprs: Vec<Box<dyn LogicalExpr>> =
-                vec![Box::new(Column::new("id")), Box::new(Column::new("name"))];
+            let exprs: Vec<Expr> = vec![
+                Expr::Column(Column::new("id")),
+                Expr::Column(Column::new("name")),
+            ];
             let projection = Projection::new(scan, exprs);
 
             assert_eq!(projection.format_node(), "Projection: #id, #name");
@@ -1300,7 +1471,7 @@ mod tests {
         #[test]
         fn display_shows_hierarchical_plan() {
             let scan = create_test_scan();
-            let exprs: Vec<Box<dyn LogicalExpr>> = vec![Box::new(Column::new("id"))];
+            let exprs: Vec<Expr> = vec![Expr::Column(Column::new("id"))];
             let projection = Projection::new(scan, exprs);
 
             let output = format!("{}", projection);
@@ -1315,8 +1486,8 @@ mod tests {
         #[test]
         fn new_creates_aggregate() {
             let scan = create_test_scan();
-            let group_by: Vec<Box<dyn LogicalExpr>> = vec![Box::new(Column::new("active"))];
-            let agg_exprs = vec![AggregateExpr::sum(Column::new("salary"))];
+            let group_by: Vec<Expr> = vec![Expr::Column(Column::new("active"))];
+            let agg_exprs = vec![AggregateExpr::sum(Expr::Column(Column::new("salary")))];
 
             let aggregate = Aggregate::new(scan, group_by, agg_exprs);
 
@@ -1327,10 +1498,10 @@ mod tests {
         #[test]
         fn schema_includes_group_and_aggregate_columns() {
             let scan = create_test_scan();
-            let group_by: Vec<Box<dyn LogicalExpr>> = vec![Box::new(Column::new("active"))];
+            let group_by: Vec<Expr> = vec![Expr::Column(Column::new("active"))];
             let agg_exprs = vec![
-                AggregateExpr::sum(Column::new("salary")),
-                AggregateExpr::count(Column::new("id")),
+                AggregateExpr::sum(Expr::Column(Column::new("salary"))),
+                AggregateExpr::count(Expr::Column(Column::new("id"))),
             ];
 
             let aggregate = Aggregate::new(scan, group_by, agg_exprs);
@@ -1346,11 +1517,11 @@ mod tests {
         #[test]
         fn schema_group_columns_come_first() {
             let scan = create_test_scan();
-            let group_by: Vec<Box<dyn LogicalExpr>> = vec![
-                Box::new(Column::new("active")),
-                Box::new(Column::new("name")),
+            let group_by: Vec<Expr> = vec![
+                Expr::Column(Column::new("active")),
+                Expr::Column(Column::new("name")),
             ];
-            let agg_exprs = vec![AggregateExpr::avg(Column::new("age"))];
+            let agg_exprs = vec![AggregateExpr::avg(Expr::Column(Column::new("age")))];
 
             let aggregate = Aggregate::new(scan, group_by, agg_exprs);
             let schema = aggregate.schema();
@@ -1363,8 +1534,8 @@ mod tests {
         #[test]
         fn children_returns_input() {
             let scan = create_test_scan();
-            let group_by: Vec<Box<dyn LogicalExpr>> = vec![Box::new(Column::new("active"))];
-            let agg_exprs = vec![AggregateExpr::count(Column::new("id"))];
+            let group_by: Vec<Expr> = vec![Expr::Column(Column::new("active"))];
+            let agg_exprs = vec![AggregateExpr::count(Expr::Column(Column::new("id")))];
 
             let aggregate = Aggregate::new(scan, group_by, agg_exprs);
 
@@ -1374,10 +1545,10 @@ mod tests {
         #[test]
         fn format_node_shows_group_and_aggregate() {
             let scan = create_test_scan();
-            let group_by: Vec<Box<dyn LogicalExpr>> = vec![Box::new(Column::new("active"))];
+            let group_by: Vec<Expr> = vec![Expr::Column(Column::new("active"))];
             let agg_exprs = vec![
-                AggregateExpr::sum(Column::new("salary")),
-                AggregateExpr::count(Column::new("id")),
+                AggregateExpr::sum(Expr::Column(Column::new("salary"))),
+                AggregateExpr::count(Expr::Column(Column::new("id"))),
             ];
 
             let aggregate = Aggregate::new(scan, group_by, agg_exprs);
@@ -1391,8 +1562,8 @@ mod tests {
         #[test]
         fn format_node_handles_empty_group_by() {
             let scan = create_test_scan();
-            let group_by: Vec<Box<dyn LogicalExpr>> = vec![];
-            let agg_exprs = vec![AggregateExpr::count(Column::new("id"))];
+            let group_by: Vec<Expr> = vec![];
+            let agg_exprs = vec![AggregateExpr::count(Expr::Column(Column::new("id")))];
 
             let aggregate = Aggregate::new(scan, group_by, agg_exprs);
 
@@ -1405,8 +1576,8 @@ mod tests {
         #[test]
         fn display_shows_hierarchical_plan() {
             let scan = create_test_scan();
-            let group_by: Vec<Box<dyn LogicalExpr>> = vec![Box::new(Column::new("active"))];
-            let agg_exprs = vec![AggregateExpr::sum(Column::new("salary"))];
+            let group_by: Vec<Expr> = vec![Expr::Column(Column::new("active"))];
+            let agg_exprs = vec![AggregateExpr::sum(Expr::Column(Column::new("salary")))];
 
             let aggregate = Aggregate::new(scan, group_by, agg_exprs);
 
@@ -1426,17 +1597,23 @@ mod tests {
             // WHERE age > 25 AND active = true
 
             let scan = create_test_scan();
-            let filter_expr = Binary::and(
-                Binary::gt(Column::new("age"), Literal::int(25)),
-                Binary::eq(Column::new("active"), Literal::bool(true)),
-            );
+            let filter_expr = Expr::Binary(Binary::and(
+                Expr::Binary(Binary::gt(
+                    Expr::Column(Column::new("age")),
+                    Expr::Literal(Literal::int(25)),
+                )),
+                Expr::Binary(Binary::eq(
+                    Expr::Column(Column::new("active")),
+                    Expr::Literal(Literal::bool(true)),
+                )),
+            ));
             let selection = Selection::new(scan, filter_expr);
 
             let projection = Projection::new(
-                Arc::new(selection),
+                Arc::new(Plan::Selection(selection)),
                 vec![
-                    Box::new(Column::new("name")),
-                    Box::new(Column::new("salary")),
+                    Expr::Column(Column::new("name")),
+                    Expr::Column(Column::new("salary")),
                 ],
             );
 
@@ -1455,14 +1632,20 @@ mod tests {
             // GROUP BY active
 
             let scan = create_test_scan();
-            let selection = Selection::new(scan, Binary::gt(Column::new("age"), Literal::int(25)));
+            let selection = Selection::new(
+                scan,
+                Expr::Binary(Binary::gt(
+                    Expr::Column(Column::new("age")),
+                    Expr::Literal(Literal::int(25)),
+                )),
+            );
 
             let aggregate = Aggregate::new(
-                Arc::new(selection),
-                vec![Box::new(Column::new("active"))],
+                Arc::new(Plan::Selection(selection)),
+                vec![Expr::Column(Column::new("active"))],
                 vec![
-                    AggregateExpr::sum(Column::new("salary")),
-                    AggregateExpr::count(Column::new("id")),
+                    AggregateExpr::sum(Expr::Column(Column::new("salary"))),
+                    AggregateExpr::count(Expr::Column(Column::new("id"))),
                 ],
             );
 
@@ -1482,15 +1665,26 @@ mod tests {
             // WHERE active = true
 
             let scan = create_test_scan();
-            let selection =
-                Selection::new(scan, Binary::eq(Column::new("active"), Literal::bool(true)));
+            let selection = Selection::new(
+                scan,
+                Expr::Binary(Binary::eq(
+                    Expr::Column(Column::new("active")),
+                    Expr::Literal(Literal::bool(true)),
+                )),
+            );
 
             let projection = Projection::new(
-                Arc::new(selection),
+                Arc::new(Plan::Selection(selection)),
                 vec![
-                    Box::new(Alias::new(Column::new("name"), "employee_name")),
-                    Box::new(Alias::new(
-                        Binary::add(Column::new("salary"), Literal::float(1000.0)),
+                    Expr::Alias(Alias::new(
+                        Expr::Column(Column::new("name")),
+                        "employee_name",
+                    )),
+                    Expr::Alias(Alias::new(
+                        Expr::Binary(Binary::add(
+                            Expr::Column(Column::new("salary")),
+                            Expr::Literal(Literal::float(1000.0)),
+                        )),
                         "adjusted_salary",
                     )),
                 ],
@@ -1508,13 +1702,24 @@ mod tests {
         #[test]
         fn deeply_nested_plan_maintains_correct_indentation() {
             let scan = create_test_scan();
-            let filter1 = Selection::new(scan, Binary::gt(Column::new("age"), Literal::int(20)));
-            let filter2 = Selection::new(
-                Arc::new(filter1),
-                Binary::lt(Column::new("age"), Literal::int(40)),
+            let filter1 = Selection::new(
+                scan,
+                Expr::Binary(Binary::gt(
+                    Expr::Column(Column::new("age")),
+                    Expr::Literal(Literal::int(20)),
+                )),
             );
-            let projection =
-                Projection::new(Arc::new(filter2), vec![Box::new(Column::new("name"))]);
+            let filter2 = Selection::new(
+                Arc::new(Plan::Selection(filter1)),
+                Expr::Binary(Binary::lt(
+                    Expr::Column(Column::new("age")),
+                    Expr::Literal(Literal::int(40)),
+                )),
+            );
+            let projection = Projection::new(
+                Arc::new(Plan::Selection(filter2)),
+                vec![Expr::Column(Column::new("name"))],
+            );
 
             let output = format!("{}", projection);
             let lines: Vec<&str> = output.lines().collect();

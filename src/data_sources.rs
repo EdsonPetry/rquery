@@ -7,6 +7,12 @@ use arrow::{
 use parquet::arrow::{ProjectionMask, arrow_reader::ParquetRecordBatchReaderBuilder};
 use std::{fmt::Display, fs::File, sync::Arc};
 
+pub enum Source {
+    Csv(CsvDataSource),
+    Parquet(ParquetDataSource),
+    InMemory(InMemoryDataSource),
+}
+
 pub trait DataSource: Display {
     fn schema(&self) -> Arc<Schema>;
 
