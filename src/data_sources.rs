@@ -13,6 +13,40 @@ pub enum Source {
     InMemory(InMemoryDataSource),
 }
 
+impl Source {
+    pub fn schema(&self) -> Arc<Schema> {
+        match self {
+            Source::Csv(ds) => ds.schema(),
+            Source::Parquet(ds) => ds.schema(),
+            Source::InMemory(ds) => ds.schema(),
+        }
+    }
+
+    pub fn scan(
+        &self,
+        projection: Option<Vec<String>>,
+    ) -> Result<
+        RecordBatchIterator<Box<dyn Iterator<Item = Result<RecordBatch, ArrowError>>>>,
+        Box<dyn std::error::Error>,
+    > {
+        match self {
+            Source::Csv(ds) => ds.scan(projection),
+            Source::Parquet(ds) => ds.scan(projection),
+            Source::InMemory(ds) => ds.scan(projection),
+        }
+    }
+}
+
+impl Display for Source {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Source::Csv(ds) => write!(f, "{}", ds),
+            Source::Parquet(ds) => write!(f, "{}", ds),
+            Source::InMemory(ds) => write!(f, "{}", ds),
+        }
+    }
+}
+
 pub trait DataSource: Display {
     fn schema(&self) -> Arc<Schema>;
 

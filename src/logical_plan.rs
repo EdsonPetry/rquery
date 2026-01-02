@@ -3,8 +3,6 @@ use std::{fmt::Display, sync::Arc};
 
 use arrow::datatypes::{DataType, Field, Schema};
 
-use crate::data_sources::DataSource;
-
 // Logical Plan
 
 pub trait LogicalPlan: Display {
@@ -413,6 +411,7 @@ pub enum Plan {
 }
 
 impl Plan {
+    /// Returns the schema that this plan node produces
     pub fn schema(&self) -> Arc<Schema> {
         match self {
             Plan::Scan(scan) => scan.schema(),
@@ -422,6 +421,7 @@ impl Plan {
         }
     }
 
+    /// Returns the child plan nodes
     pub fn children(&self) -> Vec<Arc<Plan>> {
         match self {
             Plan::Scan(scan) => scan.children(),
@@ -431,6 +431,7 @@ impl Plan {
         }
     }
 
+    /// Returns a formatted string for this node (without children)
     pub fn format_node(&self) -> String {
         match self {
             Plan::Scan(scan) => scan.format_node(),
@@ -470,7 +471,7 @@ impl LogicalPlan for Plan {
 
 pub struct Scan {
     pub path: String,
-    pub data_source: Box<dyn DataSource>,
+    pub data_source: Arc<crate::data_sources::Source>,
     pub projection: Option<Vec<String>>,
     schema: Arc<Schema>,
 }
@@ -478,10 +479,10 @@ pub struct Scan {
 impl Scan {
     pub fn new(
         path: &str,
-        data_source: Box<dyn DataSource>,
+        data_source: Arc<crate::data_sources::Source>,
         projection: Option<Vec<String>>,
     ) -> Self {
-        let schema = data_source.schema().clone();
+        let schema = data_source.schema();
         Scan {
             path: path.to_string(),
             data_source,
@@ -655,7 +656,7 @@ mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
 
     use super::*;
-    use crate::data_sources::{DataSource, InMemoryDataSource};
+    use crate::data_sources::{InMemoryDataSource, Source};
 
     fn create_test_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -667,7 +668,7 @@ mod tests {
         ]))
     }
 
-    fn create_test_data_source() -> Box<dyn DataSource> {
+    fn create_test_data_source() -> Arc<Source> {
         let schema = create_test_schema();
         let batch = arrow::record_batch::RecordBatch::try_new(
             schema,
@@ -685,7 +686,9 @@ mod tests {
         )
         .unwrap();
 
-        Box::new(InMemoryDataSource::try_new(Some(vec![batch])).unwrap())
+        Arc::new(Source::InMemory(
+            InMemoryDataSource::try_new(Some(vec![batch])).unwrap(),
+        ))
     }
 
     fn create_test_scan() -> Arc<Plan> {

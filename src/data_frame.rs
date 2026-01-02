@@ -3,7 +3,7 @@ use std::{fmt::Display, sync::Arc};
 use arrow::datatypes::Schema;
 
 use crate::{
-    data_sources::{CsvDataSource, ParquetDataSource},
+    data_sources::{CsvDataSource, ParquetDataSource, Source},
     logical_plan::{
         Aggregate, AggregateExpr, Expr, LogicalPlan, Plan, Projection, Scan, Selection,
     },
@@ -36,7 +36,7 @@ impl DataFrame {
     pub fn schema(&self) -> Arc<Schema> {
         self.plan.schema()
     }
-    pub fn logical_plan(&self) -> Arc<dyn LogicalPlan> {
+    pub fn logical_plan(&self) -> Arc<Plan> {
         self.plan.clone()
     }
 }
@@ -56,11 +56,10 @@ impl ExecutionContext {
     }
 
     pub fn csv(&self, filename: &str, delimiter: u8, header: bool) -> DataFrame {
-        let plan = Plan::Scan(Scan::new(
-            filename,
-            Box::new(CsvDataSource::try_new(filename.to_string(), delimiter, header).unwrap()),
-            None,
+        let source = Arc::new(Source::Csv(
+            CsvDataSource::try_new(filename.to_string(), delimiter, header).unwrap(),
         ));
+        let plan = Plan::Scan(Scan::new(filename, source, None));
 
         DataFrame {
             plan: Arc::new(plan),
@@ -68,11 +67,11 @@ impl ExecutionContext {
     }
 
     pub fn parquet(&self, filename: &str) -> DataFrame {
-        let plan = Plan::Scan(Scan::new(
-            filename,
-            Box::new(ParquetDataSource::try_new(filename).unwrap()),
-            None,
+        let source = Arc::new(Source::Parquet(
+            ParquetDataSource::try_new(filename).unwrap(),
         ));
+        let plan = Plan::Scan(Scan::new(filename, source, None));
+
         DataFrame {
             plan: Arc::new(plan),
         }
@@ -88,8 +87,8 @@ mod tests {
     use arrow::record_batch::RecordBatch;
 
     use super::*;
-    use crate::data_sources::InMemoryDataSource;
-    use crate::logical_plan::{AggregateExpr, Alias, Binary, Column, Literal};
+    use crate::data_sources::{InMemoryDataSource, Source};
+    use crate::logical_plan::{AggregateExpr, Alias, Binary, Column, Literal, LogicalPlan};
 
     fn create_test_schema() -> Arc<Schema> {
         Arc::new(Schema::new(vec![
@@ -116,8 +115,11 @@ mod tests {
         .unwrap()
     }
 
-    fn create_test_data_source() -> Box<dyn crate::data_sources::DataSource> {
-        Box::new(InMemoryDataSource::try_new(Some(vec![create_test_batch()])).unwrap())
+    #[allow(dead_code)]
+    fn create_test_data_source() -> Arc<Source> {
+        Arc::new(Source::InMemory(
+            InMemoryDataSource::try_new(Some(vec![create_test_batch()])).unwrap(),
+        ))
     }
 
     fn create_test_dataframe() -> DataFrame {
@@ -412,6 +414,7 @@ mod tests {
                 let df = create_test_dataframe();
                 let plan = df.logical_plan();
 
+                // Verify it's a valid plan by checking schema
                 let schema = plan.schema();
                 assert_eq!(schema.fields().len(), 5);
             }
@@ -422,6 +425,7 @@ mod tests {
                 let plan1 = df.logical_plan();
                 let plan2 = df.logical_plan();
 
+                // Both should have the same schema
                 assert_eq!(plan1.schema(), plan2.schema());
             }
         }
@@ -474,6 +478,7 @@ mod tests {
 
                 let output = format!("{}", result);
 
+                // Projection should be on top
                 let lines: Vec<&str> = output.lines().collect();
                 assert!(lines[0].contains("Projection:"));
                 assert!(lines[1].contains("Filter:"));
@@ -541,6 +546,7 @@ mod tests {
 
                 let output = format!("{}", result);
 
+                // Count filter occurrences
                 let filter_count = output.matches("Filter:").count();
                 assert_eq!(filter_count, 3);
             }
@@ -590,6 +596,7 @@ mod tests {
 
         #[test]
         fn end_to_end_csv_query() {
+            // Create test CSV
             let dir = tempdir().unwrap();
             let file_path = dir.path().join("employees.csv");
             let mut file = File::create(&file_path).unwrap();
@@ -615,10 +622,12 @@ mod tests {
                     Expr::Column(Column::new("salary")),
                 ]);
 
+            // Verify plan structure
             let output = format!("{}", df);
             assert!(output.contains("Projection: #name, #salary"));
             assert!(output.contains("Filter: #department = 'Engineering'"));
 
+            // Verify schema
             let schema = df.schema();
             let field_names: Vec<&str> =
                 schema.fields().iter().map(|f| f.name().as_str()).collect();
@@ -692,10 +701,12 @@ mod tests {
 
             let output = format!("{}", df);
 
+            // Verify plan hierarchy
             assert!(output.contains("Aggregate:"));
             assert!(output.contains("Filter:"));
             assert!(output.contains("Scan:"));
 
+            // Verify schema
             let schema = df.schema();
             assert_eq!(schema.fields().len(), 3);
         }
@@ -712,19 +723,23 @@ mod tests {
             let ctx = ExecutionContext::new();
             let df1 = ctx.csv(&file_path.to_string_lossy(), b';', true);
 
+            // Create two different transformations from the same base
             let df2 = df1.filter(Expr::Binary(Binary::eq(
                 Expr::Column(Column::new("a")),
                 Expr::Literal(Literal::int(1)),
             )));
             let df3 = df1.project(vec![Expr::Column(Column::new("b"))]);
 
+            // Original should still be a simple scan
             let output1 = format!("{}", df1);
             assert!(!output1.contains("Filter:"));
             assert!(!output1.contains("Projection:"));
 
+            // df2 should have filter
             let output2 = format!("{}", df2);
             assert!(output2.contains("Filter:"));
 
+            // df3 should have projection
             let output3 = format!("{}", df3);
             assert!(output3.contains("Projection:"));
         }
